@@ -75,10 +75,13 @@ YAML 把它当成一个普通字符串，顶层就不是 mapping 了。
 ```yaml
 services:
   frpc:
-    image: docker.1panel.live/fatedier/frpc:v0.71.1
+    image: snowdreamtech/frpc:latest
     container_name: frpc
     restart: unless-stopped
-    command: -c /etc/frp/frpc.toml
+    entrypoint: ["/usr/bin/frpc"]
+    command: ["-c", "/etc/frp/frpc.toml"]
+    environment:
+      - KEEPALIVE=0
     volumes:
       - /tmp/zfsv3/sata1/<账号>/data/Docker/frpc:/etc/frp:rw
 ```
@@ -97,18 +100,44 @@ net/http: request canceled while waiting for connection
 和拉取用的是同一家在境内的可用性，同样超时。实测这台机器上两个域名都是
 8 秒零响应，所以搜不到、也拉不动。
 
-解决办法是给 `image` 加上国内镜像源前缀，`fatedier/frpc:v0.71.1` 前加
-`docker.1panel.live/`。实测该源免鉴权、arm64 层完整、下行约 1.2MB/s，
-10MB 镜像 8 秒拉完。
+两个可选镜像：
 
-备选源（1panel 挂了再试）：`docker.1ms.run`、`hub.rat.dev`、
+| 镜像 | 体积 | 说明 |
+|---|---|---|
+| `fatedier/frpc:v0.71.1` | 10MB | 官方，ENTRYPOINT 直接就是 frpc，只需前面加镜像源前缀 |
+| `snowdreamtech/frpc:latest` | 104MB | 社区版，含 debian 基础镜像，版本同为 0.71.1，但要覆盖 entrypoint |
+
+官方镜像走国内源写成 `docker.1panel.live/fatedier/frpc:v0.71.1`。实测该源免鉴权、
+arm64 层完整、下行约 1.2MB/s。备选源：`docker.1ms.run`、`hub.rat.dev`、
 `docker.m.daocloud.io`，用法一样，都是把域名拼在 `fatedier/frpc` 前面。
+
+### snowdreamtech 镜像必须覆盖 entrypoint
+
+这个镜像的 `ENTRYPOINT` 不是 frpc，而是一个包装脚本 `docker-entrypoint.sh`，
+里面有两个会让人白等的设计：
+
+```sh
+if [ "${KEEPALIVE}" = "1" ]; then
+  tail -f /dev/null & wait     # 死循环，后面 exec 永远走不到
+fi
+...
+exec gosu "${PUID:-0}:${PGID:-0}" "$@"
+```
+
+镜像默认 `KEEPALIVE=1`，所以**按常规写法容器会一直显示「运行中」，但 frpc 从未启动**，
+隧道永远是断的。这种故障最难查：容器状态是绿的，日志里也没有报错。
+
+而且它最后 `exec gosu 0:0 "$@"`，把 `command` 当成一个完整命令名，
+写 `command: -c /etc/frp/frpc.toml` 会报 `gosu: -c: no such file or directory`。
+
+所以用这个镜像时必须三件事一起做：覆盖 `entrypoint` 为 `/usr/bin/frpc`、
+`command` 用数组形式、并把 `KEEPALIVE=0` 显式写上。
 
 ### 其他拉取异常
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
-| 报 `exec format error` | 拉到了只有 amd64 的镜像 | Z2Pro 是 ARM64，必须用带 arm64 层的官方镜像 |
+| 报 `exec format error` | 拉到了只有 amd64 的镜像 | Z2Pro 是 ARM64，必须用带 arm64 层的镜像 |
 | 换源后仍超时 | 该镜像源当日不可用 | 换下一个备选源，不要反复重试同一个 |
 
 ---
@@ -134,6 +163,10 @@ net/http: request canceled while waiting for connection
 | 命令 | 留空；若启动即退，填 `-c /etc/frp/frpc.toml` |
 
 注意目录名是 **`Docker`**（首字母大写），不是 `docker`。
+
+如果用的是 `snowdreamtech/frpc` 而不是官方镜像，图形界面这条路要多做两步：
+环境变量加 `KEEPALIVE=0`，入口（ENTRYPOINT）覆盖为 `/usr/bin/frpc`，
+命令填 `-c /etc/frp/frpc.toml`。原因见上面那节，漏了会卡在「容器运行中但隧道不通」。
 
 ---
 

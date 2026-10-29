@@ -9,14 +9,21 @@
 # 作用：把局域网里 ESP32 的 8080（控制）/ 8081（图传）隧道到阿里云，
 #       设备本身零改动，小智的云端链路完全不受影响。
 #
-# 镜像带 docker.1panel.live 前缀：国内直连 registry-1.docker.io 会超时，
-# 而极空间自带的「仓库」搜索走的是 Docker Hub API，同样搜不到。
+# 镜像用的是 snowdreamtech/frpc（Docker Hub 直连不通，官方镜像走镜像源也行，
+# 见 nas-deploy.md）。这个镜像的 ENTRYPOINT 是包装脚本，必须覆盖掉：
+#   - 默认 KEEPALIVE=1 会让容器停在 tail -f /dev/null，frpc 根本不启动；
+#   - 默认 ENTRYPOINT 会把 command 当成要 exec 的完整命令，
+#     写成 `command: -c /etc/frp/frpc.toml` 会报找不到 `-c`。
+# 所以下面同时覆盖 entrypoint 和设置 KEEPALIVE=0。
 
 services:
   frpc:
-    image: docker.1panel.live/fatedier/frpc:v0.71.1
+    image: snowdreamtech/frpc:latest
     container_name: frpc
     restart: unless-stopped
-    command: -c /etc/frp/frpc.toml
+    entrypoint: ["/usr/bin/frpc"]
+    command: ["-c", "/etc/frp/frpc.toml"]
+    environment:
+      - KEEPALIVE=0
     volumes:
       - /PATH_TO_DOCKER/frpc:/etc/frp:rw
