@@ -99,11 +99,13 @@ Docker 图形界面。容器只占 20~30MB 内存，4GB 的机器无压力。
 | 坑 | 后果 |
 |---|---|
 | `frpc.toml` 变成 `frpc.toml.txt` | 容器启动即退，日志 `config file not found` |
-| 镜像选了只有 amd64 的 | 启动报 `exec format error`，必须用 `fatedier/frpc` 官方镜像 |
+| 镜像没加国内源前缀 | 卡在 `client.Timeout exceeded while awaiting headers`，Docker Hub 直连不通 |
+| 镜像选了只有 amd64 的 | 启动报 `exec format error`，必须用带 arm64 层的官方镜像 |
 | 改完配置忘了重启容器 | 配置不热加载，改了半天没生效 |
 
-镜像用 `fatedier/frpc:v0.71.1`，挂载 `我的文件/docker/frpc` → `/etc/frp`，网络保持
-bridge，端口不用加。启动成功的标志是日志里两行 `start proxy success`。
+镜像用 `docker.1panel.live/fatedier/frpc:v0.71.1`（前缀是国内镜像源，去掉就拉不动），
+挂载 `我的文件/docker/frpc` → `/etc/frp`，网络保持 bridge，端口不用加。
+启动成功的标志是日志里两行 `start proxy success`。
 
 ## 第四步：验证（按顺序，别跳步）
 

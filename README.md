@@ -955,11 +955,12 @@ visible = true     ← 下一拍才是新画面
 谁拿到域名都能开你的车。所以 `frps.toml` 里 `proxyBindAddr = "127.0.0.1"` 不能改，
 必须让流量过 Nginx 才有 TLS 和 Basic Auth。
 
-### 极空间的两个坑
+### 极空间的三个坑
 
 | 坑 | 说明 |
 |---|---|
-| ARM64 架构 | Z2Pro 是 RK3568。镜像是 `fatedier/frpc`，官方带 arm64 层，会自匹配；别用只发 amd64 的第三方镜像 |
+| ARM64 架构 | Z2Pro 是 RK3568。镜像官方带 arm64 层，会自匹配；别用只发 amd64 的第三方镜像 |
+| Docker Hub 不可达 | 直连 `registry-1.docker.io` 与 `hub.docker.com` 都是超时，自带的「仓库」搜索也搜不到。`image` 必须加国内源前缀，如 `docker.1panel.live/fatedier/frpc:v0.71.1` |
 | 没有 SSH | 极空间默认不开 SSH，只能走 Docker 图形界面。配置文件要提前从电脑上传到共享文件夹再挂载，不能进容器手改 |
 
 ### App 侧改动

@@ -8,12 +8,15 @@
 #
 # 作用：把局域网里 ESP32 的 8080（控制）/ 8081（图传）隧道到阿里云，
 #       设备本身零改动，小智的云端链路完全不受影响。
+#
+# 镜像带 docker.1panel.live 前缀：国内直连 registry-1.docker.io 会超时，
+# 而极空间自带的「仓库」搜索走的是 Docker Hub API，同样搜不到。
 
 services:
   frpc:
-    image: fatedier/frpc:v0.71.1
+    image: docker.1panel.live/fatedier/frpc:v0.71.1
     container_name: frpc
     restart: unless-stopped
     command: -c /etc/frp/frpc.toml
     volumes:
-      - /PATH_TO_DOCKER/frpc:/etc/frp:ro
+      - /PATH_TO_DOCKER/frpc:/etc/frp:rw

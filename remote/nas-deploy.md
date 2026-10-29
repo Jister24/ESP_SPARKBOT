@@ -75,7 +75,7 @@ YAML 把它当成一个普通字符串，顶层就不是 mapping 了。
 ```yaml
 services:
   frpc:
-    image: fatedier/frpc:v0.71.1
+    image: docker.1panel.live/fatedier/frpc:v0.71.1
     container_name: frpc
     restart: unless-stopped
     command: -c /etc/frp/frpc.toml
@@ -83,13 +83,33 @@ services:
       - /tmp/zfsv3/sata1/<账号>/data/Docker/frpc:/etc/frp:rw
 ```
 
-### 镜像拉取失败怎么办
+### 镜像必须带镜像源前缀
+
+国内直连 `registry-1.docker.io` 会超时，报：
+
+```
+frpc Error Get "https://registry-1.docker.io/v2/":
+net/http: request canceled while waiting for connection
+(Client.Timeout exceeded while awaiting headers)
+```
+
+**极空间自带的「仓库」搜索也救不了** —— 它调的是 `hub.docker.com` 的 API，
+和拉取用的是同一家在境内的可用性，同样超时。实测这台机器上两个域名都是
+8 秒零响应，所以搜不到、也拉不动。
+
+解决办法是给 `image` 加上国内镜像源前缀，`fatedier/frpc:v0.71.1` 前加
+`docker.1panel.live/`。实测该源免鉴权、arm64 层完整、下行约 1.2MB/s，
+10MB 镜像 8 秒拉完。
+
+备选源（1panel 挂了再试）：`docker.1ms.run`、`hub.rat.dev`、
+`docker.m.daocloud.io`，用法一样，都是把域名拼在 `fatedier/frpc` 前面。
+
+### 其他拉取异常
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
-| 一直在 pull 卡住 | 国内直连 Docker Hub 不稳 | 设置里开镜像加速，或重启项目重试 |
-| 报 `exec format error` | 拉到了只有 amd64 的镜像 | Z2Pro 是 ARM64，必须用 `fatedier/frpc` 官方镜像 |
-| 找不到 `fatedier/frpc` | 仓库搜索不全 | 在 Compose 里直接写死 `fatedier/frpc:v0.71.1`，不走搜索 |
+| 报 `exec format error` | 拉到了只有 amd64 的镜像 | Z2Pro 是 ARM64，必须用带 arm64 层的官方镜像 |
+| 换源后仍超时 | 该镜像源当日不可用 | 换下一个备选源，不要反复重试同一个 |
 
 ---
 
@@ -97,8 +117,8 @@ services:
 
 如果这个 ZOS 版本没有 Compose 入口，或者想手动控制每一项。
 
-**先拉镜像**：Docker → 镜像 → 仓库 → 搜 `fatedier/frpc` → 标签选 `v0.71.1`
-（不要选 latest）。拉完在「本地镜像」里能看到。
+**先拉镜像**：Docker → 镜像 → 仓库搜不到（原因同上），改用「添加镜像」手动输入
+`docker.1panel.live/fatedier/frpc:v0.71.1`。拉完在「本地镜像」里能看到。
 
 **再建容器**：选中镜像 → 添加到容器：
 
