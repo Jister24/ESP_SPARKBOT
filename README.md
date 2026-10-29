@@ -411,7 +411,7 @@ python3 sparkbot.py raw 'w3'         # 灯光切闪烁
 
 ---
 
-## 九、表情风格：换成乐鑫 emote 动画（2026-10-29 已烧录验证）
+## 十一、表情风格：换成乐鑫 emote 动画（2026-10-29 已烧录验证）
 
 原固件用的是 `SpiLcdDisplay`（LVGL 那套），表情是 emoji 图片贴在屏上。这次换成
 **乐鑫 emote 动画系统**（`esp_emote_expression` + `gfx_anim` + `.eaf` 资源包），
@@ -509,7 +509,7 @@ I (3959) EmoteDisplay: SetEmotion: neutral
 
 ---
 
-## 十一、Android 客户端（2026-10-29）
+## 十二、Android 客户端（2026-10-29）
 
 `android/` 是一个 Kotlin + Jetpack Compose 的原生 App（包名 `com.shike.sparkbot`），
 把固件的局域网接口做成了完整界面，并把 xiaozhi.me 官方控制台内嵌进来。
@@ -584,7 +584,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 ---
 
-## 十二、真机实测（小米 12S / Android 15）
+## 十三、真机实测（小米 12S / Android 15）
 
 机型 `2206122SC`，Android 15 / SDK 35，1440×3200 @ 560dpi，Wi-Fi IP `192.168.1.100`
 （与机器人同 `192.168.1.0/24`，路由器 `aa:bb:cc:dd:ee:01`）。
@@ -626,7 +626,7 @@ App 正在预览时，从电脑再连 `8081/stream` 会一直阻塞（httpd 单�
 
 ---
 
-## 十三、画面方向修正：改成「仅上下翻转」（2026-10-29）
+## 十四、画面方向修正：改成「仅上下翻转」（2026-10-29）
 
 ### 之前错在哪
 
@@ -670,3 +670,67 @@ App 里看到的和存进相册的都是正确的方向。实现见 `media/Image
 | 关闭翻转 | 预览里人物脸是倒的，角标 `640×480 · 原始` |
 | 开启翻转 | 预览正立：墙上画框在上、桌上餐具在下，角标 `640×480 · 已翻转` |
 | 拍照 | 相册照片正立：人站姿端碗、身后红花画框、桌前餐盘，52450B |
+
+---
+
+## 十五、版本管理：两个 git 仓库（2026-10-29 建立）
+
+这套东西横跨「上游开源固件」和「我们自己的补丁与客户端」，所以分成两个仓库，各自职责明确：
+
+| 仓库 | 路径 | 分支 | 管什么 |
+|---|---|---|---|
+| 固件仓库 | `~/esp/xiaozhi-esp32` | **`sparkbot-local`** | 所有 C++/CMake/Kconfig 代码改动、板级 `assets/240_240/*.json`、`local_components/` |
+| 工作区仓库 | `~/WorkBuddy/Esp-sparkbot` | `main` | 文档、`firmware/`（补丁脚本与资源留档）、`client/`、`android/` |
+
+固件仓库的 `main` **保持上游原样**（`git log main` 里只有 `78/xiaozhi-esp32` 的提交），
+本地改动全部落在 `sparkbot-local` 分支上。这样两件事都成立：
+
+```bash
+cd ~/esp/xiaozhi-esp32
+git diff main sparkbot-local --stat     # 看清楚"我们到底改了什么"
+git diff main sparkbot-local -- main/   # 逐行看代码差异
+git checkout main                      # 一秒回到纯上游状态（排查"是不是我们改坏的"）
+git checkout sparkbot-local            # 再切回来
+```
+
+上游更新时：
+
+```bash
+git fetch origin
+git rebase origin/main        # 冲突基本只会出现在 main/CMakeLists.txt 与 Kconfig.projbuild
+```
+
+### 提交约定
+
+一次逻辑改动一个 commit，message 用「类型(范围): 说明」，正文写清**为什么**改：
+
+```
+feat(sparkbot): 表情改为 emote 动画风格
+fix(sparkbot): 修 240×240 布局下脸部被裁边
+docs: 补充烧录与回滚步骤
+```
+
+改动完的顺序固定为：**改代码 → `idf.py build` 通过 → `git commit` → 烧录验证 → 有问题再补一个 commit**。
+不要"先烧了再说、成功再补提交"——中间态一旦被覆盖就找不回来。
+
+### 被忽略的东西（故意的）
+
+| 忽略项 | 原因 |
+|---|---|
+| `sdkconfig` | 上游本来就忽略；本板需要的三项已写进 `boards/espressif/esp-sparkbot/config.json` 的 `sdkconfig_append`，跟着代码走 |
+| `*.bak` / `sdkconfig.bak.*` | 手工备份文件，历史交给 git |
+| `build/`、`managed_components/`、`*.bin` | 构建产物，几百 MB |
+| `android/app/build/`、`*.apk` | 同上 |
+
+`local_components/mqtt/` 是**要入库**的例外：上游组件包含真实测试私钥会被安全策略拦截，
+所以换成去掉 test/examples 的本地副本，不入库就 clone 不下来、编不过。
+
+### 回滚
+
+```bash
+git checkout -- main/boards/espressif/esp-sparkbot/assets/240_240/layout.json   # 单个文件
+git revert <commit>                                                            # 撤销某次提交并留痕
+git reset --hard <commit> && idf.py build && idf.py flash                      # 整体回到某个已知可用版本
+```
+
+最后一条最实用：任何一个"当时是好的"的 commit，都能原地重建成一个可烧录的固件。
