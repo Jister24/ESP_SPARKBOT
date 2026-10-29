@@ -1,0 +1,30 @@
+# frp 服务端配置 —— 跑在阿里云 bot.example.com
+#
+# 安装：把 frps 二进制放到 /usr/local/bin，配置放 /etc/frp/frps.toml
+#      systemd 单元见 remote/README.md
+#
+# 生成 token：openssl rand -hex 24
+
+bindPort = 7000
+
+auth.method = "token"
+auth.token = "REPLACE_WITH_RANDOM_TOKEN"
+
+# ⚠️ 关键：代理端口只绑回环。
+# 不写这行的话 18080/18081 会监听 0.0.0.0，等于绕过 Nginx 直接裸奔在公网，
+# 任何人 curl 一下就能开你的车。流量必须走 Nginx 才有 TLS 和鉴权。
+proxyBindAddr = "127.0.0.1"
+
+# 管理面板，只给本机看
+webServer.addr = "127.0.0.1"
+webServer.port = 7500
+webServer.user = "admin"
+webServer.password = "REPLACE_WITH_RANDOM_TOKEN"
+
+# 日志
+log.to = "console"
+log.level = "info"
+log.maxDays = 7
+
+# 单条隧道最长生命周期（秒）。0 = 不限，长连接图传需要不限
+transport.maxPoolCount = 5

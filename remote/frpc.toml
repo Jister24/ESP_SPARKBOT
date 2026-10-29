@@ -1,0 +1,43 @@
+# frp 客户端配置 —— 跑在极空间 Z2Pro 的 Docker 容器里
+#
+# 作用：把局域网内 SparkBot 的 8080（控制）/ 8081（图传）
+#       主动隧道到阿里云 frps，服务器侧只监听 127.0.0.1。
+#
+# 放置位置：NAS 共享文件夹 frpc/frpc.toml
+#          容器内挂载到 /etc/frp
+#
+# 改完重启容器生效（极空间 Docker 管理器 → 容器 → 重启）
+
+serverAddr = "bot.example.com"
+serverPort = 7000
+
+auth.method = "token"
+# 生成：openssl rand -hex 24
+auth.token = "REPLACE_WITH_RANDOM_TOKEN"
+
+# frpc 与 frps 之间也走 TLS（v0.50+ 默认开，这里显式声明）
+transport.tls.enable = true
+
+# 连不上服务器时保持重试，不要退出后让 Docker 反复重启
+loginFailExit = false
+
+# 可选但有用：容器内健康检查端口，方便 NAS 上判断隧道是否还活着
+webServer.addr = "0.0.0.0"
+webServer.port = 7400
+webServer.user = "admin"
+webServer.password = "REPLACE_WITH_RANDOM_TOKEN"
+
+[[proxies]]
+name = "sparkbot-ctrl"
+type = "tcp"
+# ⚠️ 设备必须在路由器上 DHCP 静态绑定，否则换 IP 后隧道指向空地址
+localIP = "192.168.1.50"
+localPort = 8080
+remotePort = 18080
+
+[[proxies]]
+name = "sparkbot-cam"
+type = "tcp"
+localIP = "192.168.1.50"
+localPort = 8081
+remotePort = 18081
