@@ -41,23 +41,27 @@ NAS 的局域网 IP 顺手记一下（极空间客户端 → 设备监控 → �
 
 ## 第二步：创建容器
 
-极空间支持 Compose，比在图形界面里逐项点快得多。文件已经放进 NAS 的
+极空间支持 Compose，比在图形界面里逐项点快得多。配置文件已经放进 NAS 的
 `Docker/frpc/` 了，不用再上传：
 
 | 文件 | 用途 |
 |---|---|
-| `docker-compose.yml` | 一键建容器，挂载路径已按本机实际路径填好 |
 | `frpc.toml` | 容器读取的隧道配置，token 已生成并填入 |
 | `frps.toml` | 给阿里云用的服务端配置，token 与上面完全一致 |
 
+⚠️ **项目目录里要留空，不能预放 `docker-compose.yml`。**
+极空间建项目时会自己往选定路径写一份 compose 文件，目录里已有同名文件就报
+「目标路径下已有同名 yml 或 env 文件」，项目根本建不起来。所以 `Docker/frpc/`
+里只放两个 toml，compose 内容在界面上粘。
+
 操作：极空间桌面 → **Docker** → **项目**（或「Compose」）→ **新增项目** →
-项目名填 `frpc` → 把 `docker-compose.yml` 的内容粘进去 → 创建并启动。
+项目名填 `frpc` → 存储路径选 `Docker/frpc` → 把下面的内容粘进编辑器 → 创建并启动。
 
 镜像会由 compose 自动拉取，首次约 20MB，耐心等半分钟。
 
-### 注意：粘的是 docker-compose.yml，不是 frpc.toml
+### 注意：粘的是 compose 内容，不是 frpc.toml
 
-两个文件都在同一个目录里，很容易拿错。粘成 `frpc.toml` 的内容会报：
+`frpc.toml` 就在同一个目录里，很容易打开它复制。粘成 `frpc.toml` 的内容会报：
 
 ```
 parsing whatever/docker-compose.yml: Top-level object must be a mapping
