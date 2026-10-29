@@ -55,6 +55,30 @@ NAS 的局域网 IP 顺手记一下（极空间客户端 → 设备监控 → �
 
 镜像会由 compose 自动拉取，首次约 20MB，耐心等半分钟。
 
+### 注意：粘的是 docker-compose.yml，不是 frpc.toml
+
+两个文件都在同一个目录里，很容易拿错。粘成 `frpc.toml` 的内容会报：
+
+```
+parsing whatever/docker-compose.yml: Top-level object must be a mapping
+```
+
+原因：`frpc.toml` 的第一行有效内容是 `serverAddr = "bot.example.com"`，
+YAML 把它当成一个普通字符串，顶层就不是 mapping 了。
+
+真正的 compose 应该长这样（以 `services:` 开头）：
+
+```yaml
+services:
+  frpc:
+    image: fatedier/frpc:v0.71.1
+    container_name: frpc
+    restart: unless-stopped
+    command: -c /etc/frp/frpc.toml
+    volumes:
+      - /tmp/zfsv3/sata1/<账号>/data/Docker/frpc:/etc/frp:rw
+```
+
 ### 镜像拉取失败怎么办
 
 | 现象 | 原因 | 处理 |
