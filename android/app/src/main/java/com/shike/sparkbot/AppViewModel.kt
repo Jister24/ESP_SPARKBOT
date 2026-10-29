@@ -201,15 +201,17 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             while (isActive) {
                 val begin = SystemClock.elapsedRealtime()
                 val status = withContext(Dispatchers.IO) {
-                    runCatching { SparkApi.status(ip, 2000) }.getOrNull()
+                    runCatching { SparkApi.status(ip, STATUS_TIMEOUT_MS) }.getOrNull()
                 }
                 val cost = (SystemClock.elapsedRealtime() - begin).toInt()
                 if (status != null) {
                     failures = 0
                     _state.update { it.copy(status = status, latencyMs = cost) }
                 } else {
+                    // 设备忙（图传编码 / 停流后刷屏）时 /status 要 1~2 秒才回，
+                    // 连着失败 3 次才算离线，否则方向键会莫名其妙变灰。
                     failures += 1
-                    if (failures >= 2) {
+                    if (failures >= 3) {
                         _state.update { it.copy(status = null, latencyMs = null) }
                     }
                 }
@@ -223,7 +225,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val begin = SystemClock.elapsedRealtime()
             val status = withContext(Dispatchers.IO) {
-                runCatching { SparkApi.status(ip, 2000) }.getOrNull()
+                runCatching { SparkApi.status(ip, STATUS_TIMEOUT_MS) }.getOrNull()
             }
             if (status != null) {
                 _state.update {
@@ -242,17 +244,26 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun startHold(x: Float, y: Float) {
         val ip = _state.value.currentIp ?: return
-        if (!_state.value.online) {
-            emit("设备离线，先检查连接")
-            return
-        }
         holdJob?.cancel()
         _state.update { it.copy(holding = true, holdVector = x to y) }
         holdJob = viewModelScope.launch {
+            var failures = 0
+            var warned = false
             while (isActive) {
                 val speed = _state.value.speed
-                withContext(Dispatchers.IO) {
-                    runCatching { SparkApi.move(ip, x * speed, y * speed) }
+                val ok = withContext(Dispatchers.IO) {
+                    runCatching { SparkApi.move(ip, x * speed, y * speed) }.isSuccess
+                }
+                if (ok) {
+                    failures = 0
+                } else {
+                    // 底盘 500ms 没收到合法指令就自停，这里漏几包不影响安全，
+                    // 只是连续失败时提醒一次，避免一路静默。
+                    failures += 1
+                    if (failures >= 3 && !warned) {
+                        warned = true
+                        emit("指令没送到设备，检查连接")
+                    }
                 }
                 delay(200)   // 底盘 500ms 看门狗，200ms 重发留足余量
             }
@@ -333,10 +344,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun startCamera() {
         val ip = _state.value.currentIp ?: return
         if (streamer != null) return
-        if (!_state.value.online) {
-            _state.update { it.copy(cameraError = "设备离线") }
-            return
-        }
+        // 不拿 /status 当门槛：设备忙时状态查询会超时，但图传本身是好的，
+        // 连不上由 MjpegStreamer 自己重试并报错。
         _state.update { it.copy(cameraOn = true, cameraError = null) }
         fpsMark = SystemClock.elapsedRealtime()
         frameCount = 0
@@ -520,6 +529,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     companion object {
         const val CONSOLE_URL = "https://xiaozhi.me/console/agents"
+
+        /** 设备空闲时 /status 只要几十毫秒，忙起来（图传编码、停流刷屏）能到 2 秒。 */
+        private const val STATUS_TIMEOUT_MS = 5000
+
         private val IP_REGEX = Regex("""^(\d{1,3}\.){3}\d{1,3}$""")
     }
 }
