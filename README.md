@@ -935,13 +935,15 @@ visible = true     ← 下一拍才是新画面
 
 ### 三处配置
 
-全部在 `remote/`，部署步骤见 `remote/README.md`：
+全部在 `remote/`，总览见 `remote/README.md`，极空间那一步的逐项操作单独写在
+`remote/nas-deploy.md`（含容器终端排障命令）：
 
 | 文件 | 放在哪 | 作用 |
 |---|---|---|
 | `frps.toml` | 阿里云 `/etc/frp/` | 7000 收隧道，代理端口绑 `127.0.0.1` |
 | `nginx-sparkbot.conf` | 阿里云现有 server 块 | `/bot/` 控制、`/botcam/` 图传，套 Basic 鉴权 |
 | `frpc.toml` | 极空间共享文件夹 `frpc/`，挂到容器 `/etc/frp` | 把 `192.168.1.50:8080/8081` 隧道出去 |
+| `nas-deploy.md` | — | 极空间 Z2Pro 的 Docker 部署与排障详解 |
 
 ### 两个必须提前处理的前提
 

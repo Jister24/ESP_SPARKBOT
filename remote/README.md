@@ -25,7 +25,7 @@
 
 ```bash
 # 用 root 或 sudo
-VERSION=0.61.1
+VERSION=0.71.1        # 与 NAS 上的 frpc 版本保持一致
 cd /tmp
 wget https://github.com/fatedier/frp/releases/download/v${VERSION}/frp_${VERSION}_linux_amd64.tar.gz
 tar -xzf frp_${VERSION}_linux_amd64.tar.gz
@@ -90,46 +90,20 @@ curl -i -u sparkbot:密码 https://bot.example.com/bot/status
 
 ## 第三步：极空间 Z2Pro 跑 frpc
 
-Z2Pro 是 RK3568（ARM64），极空间官方支持 Docker 但**默认不开放 SSH**，
-所以走图形界面。整个容器只占 20~30MB 内存，4GB 的机器无压力。
+Z2Pro 是 RK3568（ARM64），极空间官方支持 Docker 但**默认不开放 SSH**，所以只能走
+Docker 图形界面。容器只占 20~30MB 内存，4GB 的机器无压力。
 
-**1. 准备配置文件**
+这一步的界面点击、挂载配置、容器终端排障都展开写在
+**[`nas-deploy.md`](./nas-deploy.md)**，照着做即可。这里只留三个最容易翻车的点：
 
-在极空间的共享文件夹里新建 `frpc` 目录，把改好的 `remote/frpc.toml` 从电脑上传进去。
-（极空间客户端支持直接拖文件上传；也可以用它自带的文本编辑器新建。）
-
-**2. 拉镜像**
-
-Docker 管理器 → 镜像 → 仓库 → 搜索 `fatedier/frpc` → 选 `latest` 下载。
-官方镜像带 arm64 层，会自动匹配 Z2Pro 的架构。
-
-拉不下来（国内直连 Docker Hub 常失败）就二选一：
-- 在极空间设置里开 Docker 镜像加速
-- 换社区镜像 `snowdreamtech/frpc:latest`，同样支持 arm64
-
-**3. 创建容器**
-
-本地镜像 → 选中 frpc → 添加到容器：
-
-| 配置项 | 填什么 |
+| 坑 | 后果 |
 |---|---|
-| 名称 | `frpc` |
-| 性能限制 | **取消勾选**（4GB 内存要省着用） |
-| 重启策略 | 始终重启 / unless-stopped |
-| 文件夹 | NAS 的 `frpc` 目录 → 挂载到 `/etc/frp`，**读写** |
-| 端口 | 不用加（frpc 是出站连接，不监听） |
-| 网络 | 默认 bridge 即可 |
+| `frpc.toml` 变成 `frpc.toml.txt` | 容器启动即退，日志 `config file not found` |
+| 镜像选了只有 amd64 的 | 启动报 `exec format error`，必须用 `fatedier/frpc` 官方镜像 |
+| 改完配置忘了重启容器 | 配置不热加载，改了半天没生效 |
 
-如果极空间的「命令」栏是空的，手动填 `-c /etc/frp/frpc.toml`。
-
-启动后看容器日志，应该出现：
-
-```
-[sparkbot-ctrl] start proxy success
-[sparkbot-cam] start proxy success
-```
-
-服务器侧 `journalctl -u frps -f` 应同步出现 `proxy added`。
+镜像用 `fatedier/frpc:v0.71.1`，挂载 `我的文件/docker/frpc` → `/etc/frp`，网络保持
+bridge，端口不用加。启动成功的标志是日志里两行 `start proxy success`。
 
 ## 第四步：验证（按顺序，别跳步）
 

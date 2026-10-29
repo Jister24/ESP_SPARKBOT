@@ -21,7 +21,8 @@ transport.tls.enable = true
 # 连不上服务器时保持重试，不要退出后让 Docker 反复重启
 loginFailExit = false
 
-# 可选但有用：容器内健康检查端口，方便 NAS 上判断隧道是否还活着
+# 可选：状态面板。要在极空间把 7400 端口也映射出来才能访问，
+# 不映射完全不影响隧道功能，只是看不到实时 proxy 列表。
 webServer.addr = "0.0.0.0"
 webServer.port = 7400
 webServer.user = "admin"
