@@ -1,0 +1,214 @@
+# 远程访问部署手册
+
+把「只有同一局域网能用」升级成「手机在任何网络下都能遥控 + 看图」。
+
+固件**零改动**——NAS 上的 frp 客户端替设备完成穿墙，服务器侧统一收口。
+
+```
+手机 ──HTTPS──> bot.example.com ──> Nginx(鉴权/TLS) ──> frps:18080 ──隧道──> NAS frpc ──> 设备:8080
+                                        └──────────> frps:18081 ──隧道──> NAS frpc ──> 设备:8081
+```
+
+## 前置条件（必须先做，否则后面全是白费功夫）
+
+**给设备绑定静态 IP。** 设备是 DHCP，目前 `192.168.1.50`，会漂移。NAS 里的
+`frpc.toml` 写死了这个地址，一旦设备换 IP，隧道会指向空气——症状是「隧道正常、App 显示
+服务器在线、但设备一直离线」，非常难查。
+
+路由器后台 → DHCP 静态分配 → MAC `aa:bb:cc:dd:ee:ff` → 固定成 `192.168.1.50`。
+
+顺手确认设备 IP 没变过：浏览器打开 `http://192.168.1.50:8080/status` 能出 JSON 就说明地址对。
+
+---
+
+## 第一步：阿里云装 frps
+
+```bash
+# 用 root 或 sudo
+VERSION=0.61.1
+cd /tmp
+wget https://github.com/fatedier/frp/releases/download/v${VERSION}/frp_${VERSION}_linux_amd64.tar.gz
+tar -xzf frp_${VERSION}_linux_amd64.tar.gz
+install -m 755 frp_${VERSION}_linux_amd64/frps /usr/local/bin/frps
+
+mkdir -p /etc/frp
+# 把 remote/frps.toml 传上来，改掉两处 REPLACE_WITH_RANDOM_TOKEN
+openssl rand -hex 24          # 生成 token，两边的 frpc/frps 必须一致
+cp frps.toml /etc/frp/frps.toml
+```
+
+systemd 单元 `/etc/systemd/system/frps.service`：
+
+```ini
+[Unit]
+Description=frp server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/frps -c /etc/frp/frps.toml
+Restart=always
+RestartSec=5
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+systemctl daemon-reload
+systemctl enable --now frps
+systemctl status frps
+```
+
+**阿里云安全组只放行 7000。** 18080/18081 绑的是 `127.0.0.1`，本来就不对外，
+不要手贱去放行——放行了等于绕过 Nginx 和鉴权，直接裸奔。
+
+## 第二步：Nginx 加鉴权和反向代理
+
+```bash
+# 只有 2 核 2G，装轻量包就够
+apt install -y apache2-utils
+htpasswd -c /etc/nginx/.sparkbot sparkbot    # 按提示设密码，这个密码要填进 App
+```
+
+把 `remote/nginx-sparkbot.conf` 里的两个 `location` 追加到 bot.example.com 现有 server 块中，
+然后：
+
+```bash
+nginx -t && systemctl reload nginx
+```
+
+先不接隧道验证鉴权本身是通的（此时会 502，正常）：
+
+```bash
+curl -i https://bot.example.com/bot/status
+# 期望 401
+curl -i -u sparkbot:密码 https://bot.example.com/bot/status
+# 期望 502（frps 还没有客户端接入）
+```
+
+## 第三步：极空间 Z2Pro 跑 frpc
+
+Z2Pro 是 RK3568（ARM64），极空间官方支持 Docker 但**默认不开放 SSH**，
+所以走图形界面。整个容器只占 20~30MB 内存，4GB 的机器无压力。
+
+**1. 准备配置文件**
+
+在极空间的共享文件夹里新建 `frpc` 目录，把改好的 `remote/frpc.toml` 从电脑上传进去。
+（极空间客户端支持直接拖文件上传；也可以用它自带的文本编辑器新建。）
+
+**2. 拉镜像**
+
+Docker 管理器 → 镜像 → 仓库 → 搜索 `fatedier/frpc` → 选 `latest` 下载。
+官方镜像带 arm64 层，会自动匹配 Z2Pro 的架构。
+
+拉不下来（国内直连 Docker Hub 常失败）就二选一：
+- 在极空间设置里开 Docker 镜像加速
+- 换社区镜像 `snowdreamtech/frpc:latest`，同样支持 arm64
+
+**3. 创建容器**
+
+本地镜像 → 选中 frpc → 添加到容器：
+
+| 配置项 | 填什么 |
+|---|---|
+| 名称 | `frpc` |
+| 性能限制 | **取消勾选**（4GB 内存要省着用） |
+| 重启策略 | 始终重启 / unless-stopped |
+| 文件夹 | NAS 的 `frpc` 目录 → 挂载到 `/etc/frp`，**读写** |
+| 端口 | 不用加（frpc 是出站连接，不监听） |
+| 网络 | 默认 bridge 即可 |
+
+如果极空间的「命令」栏是空的，手动填 `-c /etc/frp/frpc.toml`。
+
+启动后看容器日志，应该出现：
+
+```
+[sparkbot-ctrl] start proxy success
+[sparkbot-cam] start proxy success
+```
+
+服务器侧 `journalctl -u frps -f` 应同步出现 `proxy added`。
+
+## 第四步：验证（按顺序，别跳步）
+
+```bash
+# 1. 设备本身通不通（在 NAS 所在局域网内测）
+curl http://192.168.1.50:8080/status
+
+# 2. 隧道通不通（任意网络）
+curl -u sparkbot:密码 https://bot.example.com/bot/status
+
+# 3. 控制指令
+curl -u sparkbot:密码 "https://bot.example.com/bot/move?x=0&y=1"
+curl -u sparkbot:密码 https://bot.example.com/bot/stop
+
+# 4. 图传（存下来看能不能打开）
+curl -u sparkbot:密码 -o /tmp/remote.jpg https://bot.example.com/botcam/snapshot
+file /tmp/remote.jpg        # 应该是 JPEG image data, 640x480
+```
+
+四步全过，剩下的就只是 App 改 baseUrl 了。
+
+## 第五步：App 切换远程
+
+`SparkApi.kt` 里现在硬编码 `http://$host:$port$path`，改成按 Endpoint 计算：
+
+```kotlin
+sealed interface Endpoint {
+    data class Lan(val ip: String) : Endpoint
+    data class Remote(val host: String) : Endpoint
+}
+
+fun Endpoint.ctrl(path: String) = when (this) {
+    is Endpoint.Lan    -> "http://$ip:8080$path"
+    is Endpoint.Remote -> "https://$host/bot$path"
+}
+
+fun Endpoint.cam(path: String) = when (this) {
+    is Endpoint.Lan    -> "http://$ip:8081$path"
+    is Endpoint.Remote -> "https://$host/botcam$path"
+}
+```
+
+两处都还要加鉴权头（`Endpoint.Remote` 时）：
+
+```kotlin
+setRequestProperty("Authorization", "Basic " + Base64.encodeToString(
+    "sparkbot:密码".toByteArray(), Base64.NO_WRAP))
+```
+
+`AppViewModel` 和四个页面**一行都不用改**——它们拿到的是封装好的方法，不知道背后走的是
+局域网还是公网。这也是为什么这套方案值得做：网络位置变成了 Endpoint 的一个属性，
+而不是散落在各处的 if 判断。
+
+---
+
+## 排障表
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| 容器反复重启 | token 两边不一致，或 7000 没放行 | 看容器日志，比对 frpc/frps 的 token |
+| `/bot/status` 一直 502 | frps 没有客户端接入 | `journalctl -u frps -f` 看有没有 `proxy added` |
+| `/bot/status` 401 | 请求没带 Basic 头 | App 里加 Authorization |
+| 隧道在、设备一直离线 | 设备 IP 漂了 | 回前端绑静态 IP |
+| `/botcam/stream` 越看越卡 | Nginx 缓存了 MJPEG | 确认 `proxy_buffering off` 已生效 |
+| 能控制不能看图 | 8081 是单任务 httpd | 关掉其他正在看图的客户端 |
+| 图传 1~2fps | 固件瓶颈，不是网络 | 见下方说明 |
+
+## 关于帧率：别怀疑网络
+
+设备实测图传 **1.6fps**（640×480，单帧 28KB ≈ 360kbps）。瓶颈在 GC2145 抓帧 +
+软件 JPEG 编码的 500~600ms/帧，**不在带宽**。千兆下行配 30~50Mbps 上行的家宽，
+360kbps 只占 1% 左右，隧道不会是限制项。
+
+想真的提帧率只能改固件：降到 320×240 + quality 60，能到 4~6fps，带宽也会跟着降。
+这件事和远程化是两件独立的事，先把通路打通再谈优化。
+
+## 安全边界
+
+- 设备本身没有密码，**鉴权完全靠 Nginx 的 Basic Auth**。密码泄露 = 车能被别人开。
+- 18080/18081 只绑 `127.0.0.1`，公网扫不到，但别为了图方便改成 `0.0.0.0`。
+- 整条链路是 WSS/HTTPS，方向键不会被运营商或中间节点看到。
+- App 里存的是明文密码（SharedPreferences），自己用够了；要给别人用得换 token 方案。

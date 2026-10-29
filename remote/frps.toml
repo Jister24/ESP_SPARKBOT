@@ -10,7 +10,7 @@ bindPort = 7000
 auth.method = "token"
 auth.token = "REPLACE_WITH_RANDOM_TOKEN"
 
-# ⚠️ 关键：代理端口只绑回环。
+# 关键：代理端口只绑回环。
 # 不写这行的话 18080/18081 会监听 0.0.0.0，等于绕过 Nginx 直接裸奔在公网，
 # 任何人 curl 一下就能开你的车。流量必须走 Nginx 才有 TLS 和鉴权。
 proxyBindAddr = "127.0.0.1"

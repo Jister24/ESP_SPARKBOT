@@ -30,7 +30,7 @@ webServer.password = "REPLACE_WITH_RANDOM_TOKEN"
 [[proxies]]
 name = "sparkbot-ctrl"
 type = "tcp"
-# ⚠️ 设备必须在路由器上 DHCP 静态绑定，否则换 IP 后隧道指向空地址
+# 注意：设备必须在路由器上 DHCP 静态绑定，否则换 IP 后隧道指向空地址
 localIP = "192.168.1.50"
 localPort = 8080
 remotePort = 18080
