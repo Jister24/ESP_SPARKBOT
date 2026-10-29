@@ -814,6 +814,30 @@ I (3939) EmoteDisplay: SetEmotion: neutral
 EmoteDisplay: preview: 240x240 cover-cropped from 240x240, shown for 5000 ms
 ```
 
+### 第二个坑：满屏雪花 = 字节序
+
+第一版烧上去屏上全是雪花。原因不在拷贝逻辑，在**字节序**：
+
+```c
+emote_config_t.flags.swap = true;     // 本板 emote 初始化，帧缓冲要翻转过的 RGB565
+```
+
+EAF 解码器每吐一个像素都会过一遍 `gfx_color_to_native_u16(color, swap)`，
+而 gfx 的**图像**绘制路径（`gfx_sw_blend_img_draw` 无 mask 分支）是裸 `memcpy`，
+源码里写着 `src_buf is expected to already be in native framebuffer order` ——
+它不替你做转换。摄像头给的是小端 RGB565，直接拷进去就跟帧缓冲反了。
+
+修法是拷贝时翻一次字节：`dst[x] = (px >> 8) | (px << 8);`
+
+> 凡是往 gfx 里塞自己生成的像素，都要先转成 native 顺序。这条对后续加任何 overlay 都适用。
+
+### 顺带纠正一个之前的错判
+
+`8081/snapshot` **会**触发预览：`GetJpegFrame()` 内部先调 `Capture()`，而预览就在
+`Capture()` 末尾。所以可以用 `curl http://设备IP:8081/snapshot` 远程触发一次拍照来验证，
+不必每次都开口说话。另外抓到的 JPEG 是 **640×480**，而预览帧也是 640×480 → 中心 480×480
+裁切再缩到 240×240，不是直接拷。
+
 三种异常的对症改法：
 
 | 现象 | 原因 | 改法 |
