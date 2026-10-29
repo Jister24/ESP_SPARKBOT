@@ -1,0 +1,19 @@
+# 极空间 Z2Pro —— SparkBot 远程访问隧道
+#
+# 用法：极空间 → Docker → 新增项目（Compose）→ 项目名填 frpc → 粘贴本文件 → 创建
+#
+# 把下面的 /PATH_TO_DOCKER 换成极空间里的真实路径：
+# 在 Compose 编辑页点「查询路径」，选中 Docker 下的 frpc 文件夹即可直接复制。
+# 本机实际形如：/tmp/zfsv3/sata1/<账号>/data/Docker/frpc
+#
+# 作用：把局域网里 ESP32 的 8080（控制）/ 8081（图传）隧道到阿里云，
+#       设备本身零改动，小智的云端链路完全不受影响。
+
+services:
+  frpc:
+    image: fatedier/frpc:v0.71.1
+    container_name: frpc
+    restart: unless-stopped
+    command: -c /etc/frp/frpc.toml
+    volumes:
+      - /PATH_TO_DOCKER/frpc:/etc/frp:ro

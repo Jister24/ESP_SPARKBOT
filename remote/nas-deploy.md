@@ -20,150 +20,76 @@ NAS 的局域网 IP 顺手记一下（极空间客户端 → 设备监控 → �
 
 ---
 
-## 第一步：准备 frpc.toml
+## 第一步：配置已就位
 
-### 1.1 在电脑上改好配置
+三份文件已经放进 NAS 的 `Docker/frpc/`，token 是生成好的 48 位随机串，
+`frpc.toml` 和 `frps.toml` 里是同一个值。**这一步不需要你做任何事。**
 
-打开 `remote/frpc.toml`，需要改两处：
+以后如果想换 token（比如怀疑泄露）：
 
-```toml
-auth.token = "REPLACE_WITH_RANDOM_TOKEN"       # 改成和服务器 frps.toml 一致
-webServer.password = "REPLACE_WITH_RANDOM_TOKEN"  # 同上
-```
+1. 同时改 `frpc.toml` 和 `frps.toml` 的 `auth.token` 与 `webServer.password`，两边必须一致
+2. 重启 NAS 上的 frpc 容器
+3. 重启阿里云的 frps
 
-token 生成：
+生成新 token：`openssl rand -hex 24`
 
-```bash
-openssl rand -hex 24
-```
-
-完整配置（可直接复制改 token）：
-
-```toml
-serverAddr = "bot.example.com"
-serverPort = 7000
-
-auth.method = "token"
-auth.token = "把上面生成的串粘这里"
-
-transport.tls.enable = true
-loginFailExit = false
-
-webServer.addr = "0.0.0.0"
-webServer.port = 7400
-webServer.user = "admin"
-webServer.password = "同一个串也行"
-
-[[proxies]]
-name = "sparkbot-ctrl"
-type = "tcp"
-localIP = "192.168.1.50"
-localPort = 8080
-remotePort = 18080
-
-[[proxies]]
-name = "sparkbot-cam"
-type = "tcp"
-localIP = "192.168.1.50"
-localPort = 8081
-remotePort = 18081
-```
-
-### 1.2 上传到 NAS
-
-极空间客户端（手机或电脑版）→ 我的文件 → 新建文件夹 `docker` → 里面再建 `frpc` →
-把 `frpc.toml` 传进去。
-
-最终路径形如：`我的文件/docker/frpc/frpc.toml`
-
-**这里有个必踩的坑：文件名不能变成 `frpc.toml.txt`。**
-
-Windows 默认隐藏已知扩展名，你在记事本里"另存为 `frpc.toml`"实际产出的是
-`frpc.toml.txt`。挂载进容器后 frpc 找不到 `/etc/frp/frpc.toml`，容器启动即退出，
-日志只有一句 `config file not found`。
-
-上传前在极空间文件列表里确认名字显示就是 `frpc.toml`，没有多余的 `.txt`。
+**历史坑存档**：文件名不能是 `frpc.toml.txt`。Windows 隐藏已知扩展名，记事本里
+"另存为 frpc.toml"实际产出 `frpc.toml.txt`，挂载进容器后 frpc 找不到配置、启动即退，
+日志只有一句 `config file not found`。这次是直接写入 NAS 的，不存在这个问题。
 
 ---
 
-## 第二步：拉取镜像
+## 第二步：创建容器
 
-极空间桌面 → **Docker**（若没有，先去「应用中心」安装 Docker 组件）
-→ 顶部 **镜像** → **仓库** → 搜索框输入 `fatedier/frpc` → 点搜索图标。
+极空间支持 Compose，比在图形界面里逐项点快得多。文件已经放进 NAS 的
+`Docker/frpc/` 了，不用再上传：
 
-选中结果 → 点「下载」→ 标签选择 **`v0.71.1`**（不要选 latest）。
+| 文件 | 用途 |
+|---|---|
+| `docker-compose.yml` | 一键建容器，挂载路径已按本机实际路径填好 |
+| `frpc.toml` | 容器读取的隧道配置，token 已生成并填入 |
+| `frps.toml` | 给阿里云用的服务端配置，token 与上面完全一致 |
 
-拉镜像这一步有三个常见卡点：
+操作：极空间桌面 → **Docker** → **项目**（或「Compose」）→ **新增项目** →
+项目名填 `frpc` → 把 `docker-compose.yml` 的内容粘进去 → 创建并启动。
+
+镜像会由 compose 自动拉取，首次约 20MB，耐心等半分钟。
+
+### 镜像拉取失败怎么办
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
-| 搜不到 `fatedier/frpc` | 极空间仓库搜索只匹配部分字段 | 改用「添加镜像」手动输入 `fatedier/frpc:v0.71.1` |
-| 下载卡住不动 | 国内直连 Docker Hub 不稳 | 设置里开镜像加速，或换 `snowdreamtech/frpc:v0.71.1` |
-| 启动报 `exec format error` | 拉到了只有 amd64 的镜像 | Z2Pro 是 ARM64，必须用带 arm64 层的官方镜像 |
-
-下载完成后会自动跳到「本地镜像」，能看到 `fatedier/frpc:v0.71.1`。
+| 一直在 pull 卡住 | 国内直连 Docker Hub 不稳 | 设置里开镜像加速，或重启项目重试 |
+| 报 `exec format error` | 拉到了只有 amd64 的镜像 | Z2Pro 是 ARM64，必须用 `fatedier/frpc` 官方镜像 |
+| 找不到 `fatedier/frpc` | 仓库搜索不全 | 在 Compose 里直接写死 `fatedier/frpc:v0.71.1`，不走搜索 |
 
 ---
 
-## 第三步：创建容器
+## 备选：图形界面逐项创建
 
-在「本地镜像」里选中 `fatedier/frpc:v0.71.1` → 点 **添加到容器**。
+如果这个 ZOS 版本没有 Compose 入口，或者想手动控制每一项。
 
-按下面逐项填：
+**先拉镜像**：Docker → 镜像 → 仓库 → 搜 `fatedier/frpc` → 标签选 `v0.71.1`
+（不要选 latest）。拉完在「本地镜像」里能看到。
 
-### 基础设置
+**再建容器**：选中镜像 → 添加到容器：
 
 | 项 | 填什么 |
 |---|---|
 | 容器名称 | `frpc` |
-| 重启策略 | **总是**（NAS 重启、容器崩溃都自动拉起） |
+| 重启策略 | **总是** |
 | 开机自启 | **勾选** |
-| 性能限制 | **取消勾选**（Z2Pro 只有 4GB 内存，但 frpc 只吃 20MB，限制反而容易出问题） |
+| 性能限制 | **取消勾选**（4GB 内存，frpc 只吃 20MB） |
+| 文件夹 | `我的文件/Docker/frpc` → 装载 `/etc/frp`，读写 |
+| 端口 | **不用加**（frpc 是出站客户端，不监听） |
+| 网络 | 默认 bridge |
+| 命令 | 留空；若启动即退，填 `-c /etc/frp/frpc.toml` |
 
-### 文件夹（关键，决定成败）
-
-点 **添加**：
-
-| 项 | 填什么 |
-|---|---|
-| 主机路径 | 选 `我的文件/docker/frpc`（就是刚上传配置的目录） |
-| 装载路径 | `/etc/frp` |
-| 权限 | 读写 |
-
-挂整个目录比挂单个文件稳。如果极空间这个版本只支持挂文件，那就挂
-`frpc.toml` → `/etc/frp/frpc.toml`，效果一样。
-
-### 端口
-
-**不用加。** frpc 是主动连出去的客户端，不在 NAS 上监听任何端口。
-如果界面强制要求至少一条，随便填 `7400 → 7400`（对应配置里的 webServer），不影响功能。
-
-### 网络
-
-保持默认 **bridge**。frpc 只需要能出网，不需要被外部访问。
-
-如果后面日志报 DNS 解析失败（`lookup bot.example.com: no such host`），再改成 **host**。
-
-### 环境变量
-
-不需要。
-
-### 命令
-
-**先留空。** 官方镜像的 ENTRYPOINT 已经是 `/usr/bin/frpc`，CMD 是 `-c /etc/frp/frpc.toml`，
-默认就能跑。
-
-只有一种情况要手填：容器启动后三五秒就退出、日志里报参数错误。那时在命令/启动参数栏填：
-
-```
--c /etc/frp/frpc.toml
-```
-
-全部确认后点 **应用**。
+注意目录名是 **`Docker`**（首字母大写），不是 `docker`。
 
 ---
 
-## 第四步：验证
+## 第三步：验证
 
 ### 4.1 看容器日志
 
@@ -206,7 +132,7 @@ curl -u sparkbot:你设的密码 https://bot.example.com/bot/status
 
 ---
 
-## 第五步：用容器终端排障（极空间的隐藏能力）
+## 第四步：用容器终端排障（极空间的隐藏能力）
 
 极空间不开放宿主机 SSH，但 **Docker 容器内部可以进终端**——这足够定位绝大多数问题。
 
