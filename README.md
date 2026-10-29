@@ -471,7 +471,9 @@ mirror_offset = parent_w - (width + x) * 2     // esp_emote_gfx/src/widget/anim/
 | 320×240（官方） | 10 | offset 50，整体 300 宽，居中 |
 | **240×240（本机）** | **-5** | offset 0，整体 250 宽，两边各裁 5px（脸是黑底，看不出来） |
 
-竖直方向 `y=40`（(240-160)/2）正好居中；`listen_anim` 是 100×46 的小动画，放 `y=4`。
+竖直方向：数学居中位置是 `y=40`（(240-160)/2），但实测看着偏下，**实际用了 `y=24`**
+（上移 16px，顶部留 24、底部留 56），视觉重心更舒服。`listen_anim` 是 100×46 的小动画，
+放 `y=4`。想再调就改 `eye_anim` / `emerg_dlg` 两处的 `y`，两个必须一起改，否则弹窗动画会跳。
 
 ### 验证结果（实测）
 
@@ -734,3 +736,90 @@ git reset --hard <commit> && idf.py build && idf.py flash                      #
 ```
 
 最后一条最实用：任何一个"当时是好的"的 commit，都能原地重建成一个可烧录的固件。
+
+---
+
+## 十六、拍照后在屏幕上回看 5 秒（2026-10-30 实现）
+
+需求：**设备拍照时，屏幕显示刚拍的照片，5 秒后变回表情。**
+
+### 先说踩到的坑：拍照工具被显示风格顺手关掉了
+
+换 emote 风格后，对着设备说「拍张照」没有任何反应。查开机日志：
+
+```
+MCP: 15 tools registered: 11 visible to the model, 4 user-only
+MCP: Add tool: self.camera.set_camera_flipped      ← 有摄像头相关工具
+（没有 self.camera.take_photo）                     ← 但唯独没有拍照
+```
+
+摄像头本身是好的（`8081/snapshot` 一直能出图），问题在 `mcp_server.cc`：
+`self.camera.take_photo` 的注册代码躺在 `#ifdef HAVE_LVGL` 块里，而
+`display.h:7` 是 `#ifndef CONFIG_USE_EMOTE_MESSAGE_STYLE` 才定义 `HAVE_LVGL`。
+**开了 emote 就没了这个宏，拍照工具跟着整块消失。**
+
+修法是把摄像头那段移出 `#ifdef`（`set_theme` 依赖 `LvglThemeManager`，仍留在里面）。
+修完 `16 tools registered`，`self.camera.take_photo` 回来了。
+
+> 教训：`HAVE_LVGL` 是"显示风格"开关，不是"有没有摄像头"开关。以后往这个块里加东西要小心。
+
+### 怎么把照片显示出来
+
+`EmoteDisplay::SetPreviewImage` 原来是打印一行日志的空实现，而 `EspVideo::Capture()`
+拍完确实会调用它，所以以前拍照在屏幕上零反馈。
+
+**不能直接 `esp_lcd_panel_draw_bitmap` 写 panel。** 表情由 emote 的渲染任务逐帧重绘，
+绕开它写的像素下一帧就被冲掉；而渲染任务的刷屏等待没有公开的暂停接口，硬抢会把它卡死。
+
+改成 **gfx 的自定义 image 对象**：
+
+| 做法 | 效果 |
+|---|---|
+| 对象在 `SetPreviewImage` 里懒创建一次 | 后创建 → 排在子对象链末尾 → 后绘制 → 盖在表情上面 |
+| 收起时 `gfx_obj_set_visible(obj, false)` | 该对象 `invalidate` 整块区域，`gfx_render_part_area` 先用背景色填、再重画表情层 |
+| 5 秒用一次性 `esp_timer` | 连拍时先 `stop` 再 `start`，不会让第一张的计时器提前收掉第二张 |
+
+背景填充这件事有源码依据，不是猜的：
+
+```
+gfx_disp.c:52          disp->style.bg_enable = true;        // 默认开
+gfx_render.c:223-230   if (disp->style.bg_enable) { ... gfx_sw_blend_fill_area(buf, ..., bg); }
+```
+
+emote 初始化只调 `gfx_disp_set_bg_color` 设颜色，没关 `bg_enable`，所以收起照片时
+表情没覆盖到的边角也会被刷干净，不留残影。
+
+### 几个实现细节
+
+| 项目 | 做法 |
+|---|---|
+| 尺寸 | 屏幕是方的、照片不是：**cover** 处理，短边铺满、长边居中裁切，不变形不留黑边 |
+| 缓冲 | 240×240×2 = 115KB，优先 PSRAM，首次拍照分配后复用 |
+| 格式 | 只画 RGB565（YUV/RGB24/JPEG 在 `esp_video.cc` 里早就转好了），其他格式打警告跳过 |
+| 撕裂 | 写像素前若上一张还挂着，先 `visible=false`，否则渲染任务会读到半新半旧 |
+| 改时长 | `emote_display.cc` 的 `kPreviewDurationMs`，默认 5000 |
+
+### 实测
+
+```
+I (709) MCP: Add tool: self.camera.take_photo      ← 修复后回来了
+I (729) MCP: 16 tools registered: 12 visible to the model, 4 user-only
+I (3349) EmoteDisplay: SetStatus: 登录服务器...
+I (3939) EmoteDisplay: SetEmotion: neutral
+```
+
+拍照时会打印：
+
+```
+EmoteDisplay: preview: 240x240 cover-cropped from 240x240, shown for 5000 ms
+```
+
+三种异常的对症改法：
+
+| 现象 | 原因 | 改法 |
+|---|---|---|
+| 颜色偏蓝/偏红 | RGB565 字节序 | 拷贝时 `__builtin_bswap16` |
+| 画面上下颠倒 | 拍照路径的 `rotate180_` 没生效 | 查 `EspVideo::Capture` 的旋转分支 |
+| 裁掉太多 | cover 太激进 | 改成留黑边的 fit（改 `crop_w/crop_h` 计算） |
+
+`firmware/emote_style/240_240/layout.json` 也同步了这次 `y=24` 的上移。
