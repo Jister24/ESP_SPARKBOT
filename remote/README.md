@@ -9,6 +9,20 @@
                                         └──────────> frps:18081 ──隧道──> NAS frpc ──> 设备:8081
 ```
 
+## 当前状态：已部署跑通（2026-10-30 01:15）
+
+| 项 | 值 |
+|---|---|
+| 控制 | `https://bot.example.com/bot/status` |
+| 图传 | `https://bot.example.com/botcam/stream` |
+| Basic 鉴权 | 用户 `sparkbot`，密码见 NAS `Docker/frpc/access.txt` |
+| frps | 0.71.1，systemd `frps.service`，`0.0.0.0:7000` |
+| 隧道 | 设备 `192.168.1.50:8080/8081` → 服务器 `127.0.0.1:18080/18081` |
+| 实测 | 外网 `/status` 200（0.75s）、MJPEG 约 300KB/5s、`move` 与 `stop` 均 200 |
+
+固件和 App 都还没改。App 侧下一步：把 `SparkApi` 的 baseUrl 抽象成
+`Endpoint.Lan / Endpoint.Remote`，Remote 分支加 `Authorization: Basic` 头。
+
 ## 前置条件（必须先做，否则后面全是白费功夫）
 
 **给设备绑定静态 IP。** 设备是 DHCP，目前 `192.168.1.50`，会漂移。NAS 里的
@@ -64,6 +78,22 @@ systemctl status frps
 **阿里云安全组只放行 7000。** 18080/18081 绑的是 `127.0.0.1`，本来就不对外，
 不要手贱去放行——放行了等于绕过 Nginx 和鉴权，直接裸奔。
 
+⚠️ 加 7000 这一步踩过坑，值得记下来：**要加在实例真正绑定的那个安全组上**。
+ECS 控制台左侧菜单点「安全组」会列出该地域所有安全组，很容易改到没绑这台机器的那个，
+现象是「规则明明写着允许，端口就是不通」。
+
+判别方法：挑一条同组内**系统创建**的放行规则（比如 8000），从外网测它。
+如果 8000 也不通而 80/443 通，说明你改的组没生效，去控制台「实例 → 选中实例 → 安全组」
+页签里看真正绑定的是哪个。这台机器是 `i-xxxxxxxxxxxxxxxx`（cn-beijing）。
+
+另一个快速判据是**从服务器自己连自己的公网 IP**：
+
+```bash
+timeout 6 bash -c "cat < /dev/null > /dev/tcp/203.0.113.10/7000" && echo 通 || echo 不通
+```
+
+这台机器上 ufw 关闭、iptables 全 ACCEPT，所以自测不通就一定是云上那一层拦的。
+
 ## 第二步：Nginx 加鉴权和反向代理
 
 ```bash
@@ -76,8 +106,15 @@ htpasswd -c /etc/nginx/.sparkbot sparkbot    # 按提示设密码，这个密码
 然后：
 
 ```bash
+# 必须改属组，否则 nginx worker(www-data) 打不开文件
+chown root:www-data /etc/nginx/.sparkbot
+chmod 640 /etc/nginx/.sparkbot
+
 nginx -t && systemctl reload nginx
 ```
+
+漏掉 `chown` 的现象很有欺骗性：无凭据访问是 401（正常），带正确凭据却是 **500**。
+error.log 里只有一行 `[crit] open() "/etc/nginx/.sparkbot" failed (13: Permission denied)`。
 
 先不接隧道验证鉴权本身是通的（此时会 502，正常）：
 
