@@ -74,7 +74,7 @@ private val TABS = listOf("设备" to 0, "遥控" to 1, "相机" to 2, "账号" 
 fun AppRoot(vm: AppViewModel = viewModel()) {
     val state by vm.state.collectAsState()
     val context = LocalContext.current
-    var tab by rememberSaveable { mutableIntStateOf(if (state.currentIp != null) 1 else 0) }
+    var tab by rememberSaveable { mutableIntStateOf(if (state.hasTarget) 1 else 0) }
 
     LaunchedEffect(Unit) {
         vm.events.collect { message ->

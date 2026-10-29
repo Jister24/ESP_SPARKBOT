@@ -68,8 +68,9 @@ fun CameraScreen(state: UiState, vm: AppViewModel) {
         if (granted) vm.capturePhoto() else vm.emit("没有存储权限，无法保存到相册")
     }
 
-    LaunchedEffect(state.currentIp) {
-        if (state.currentIp != null) vm.startCamera() else vm.stopCamera()
+    // 换设备或换连接方式都要重开流，否则会继续拉旧地址的 MJPEG
+    LaunchedEffect(state.currentIp, state.mode, state.remoteHost) {
+        if (state.hasTarget) vm.startCamera() else vm.stopCamera()
     }
 
     Column(
@@ -179,12 +180,12 @@ fun CameraScreen(state: UiState, vm: AppViewModel) {
         // 放在图传下方，眼睛不用离开画面就能开；状态角标也在预览左上角同步显示。
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             DriveKey(
-                arrow = "▲", label = "前进", modifier = Modifier.weight(1f), enabled = state.currentIp != null,
+                arrow = "▲", label = "前进", modifier = Modifier.weight(1f), enabled = state.hasTarget,
                 active = state.holding && state.holdVector == (0f to 1f),
                 onStart = { vm.startHold(0f, 1f) }, onEnd = { vm.stopMotion() }
             )
             DriveKey(
-                arrow = "▼", label = "后退", modifier = Modifier.weight(1f), enabled = state.currentIp != null,
+                arrow = "▼", label = "后退", modifier = Modifier.weight(1f), enabled = state.hasTarget,
                 active = state.holding && state.holdVector == (0f to -1f),
                 onStart = { vm.startHold(0f, -1f) }, onEnd = { vm.stopMotion() }
             )
@@ -194,12 +195,12 @@ fun CameraScreen(state: UiState, vm: AppViewModel) {
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             DriveKey(
-                arrow = "◀", label = "左转", modifier = Modifier.weight(1f), enabled = state.currentIp != null,
+                arrow = "◀", label = "左转", modifier = Modifier.weight(1f), enabled = state.hasTarget,
                 active = state.holding && state.holdVector == (-1f to 0f),
                 onStart = { vm.startHold(-1f, 0f) }, onEnd = { vm.stopMotion() }
             )
             DriveKey(
-                arrow = "▶", label = "右转", modifier = Modifier.weight(1f), enabled = state.currentIp != null,
+                arrow = "▶", label = "右转", modifier = Modifier.weight(1f), enabled = state.hasTarget,
                 active = state.holding && state.holdVector == (1f to 0f),
                 onStart = { vm.startHold(1f, 0f) }, onEnd = { vm.stopMotion() }
             )
@@ -226,7 +227,7 @@ fun CameraScreen(state: UiState, vm: AppViewModel) {
             },
             modifier = Modifier.fillMaxWidth().height(52.dp),
             shape = RoundedCornerShape(16.dp),
-            enabled = !state.captureBusy && state.currentIp != null,
+            enabled = !state.captureBusy && state.hasTarget,
             colors = ButtonDefaults.buttonColors(
                 containerColor = Accent,
                 disabledContainerColor = SurfaceHigh

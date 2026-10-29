@@ -58,7 +58,11 @@ fun ControlScreen(state: UiState, vm: AppViewModel) {
         Spacer(Modifier.height(20.dp))
         ScreenHeader(
             "遥控",
-            if (state.online) "${state.currentIp} · ${state.latencyMs ?: 0} ms" else "设备离线"
+            when {
+                state.online -> "${state.targetLabel} · ${state.latencyMs ?: 0} ms"
+                state.hasTarget -> "设备离线"
+                else -> "未选择设备"
+            }
         )
 
         Spacer(Modifier.height(16.dp))

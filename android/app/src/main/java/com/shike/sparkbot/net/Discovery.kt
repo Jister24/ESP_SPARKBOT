@@ -100,7 +100,7 @@ object Discovery {
         } catch (_: Exception) {
             return null
         }
-        return runCatching { SparkApi.status(ip, statusMs) }.getOrNull()
+        return runCatching { SparkApi.status(Endpoint.Lan(ip), statusMs) }.getOrNull()
     }
 
     private const val TOTAL_HOSTS = 254

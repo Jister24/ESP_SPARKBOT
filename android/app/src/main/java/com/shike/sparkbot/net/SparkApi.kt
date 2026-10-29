@@ -8,6 +8,8 @@ import java.net.URL
 /**
  * 与固件 local_control 模块通信。
  * 8080：控制（毫秒级）；8081：图传 / 抓图（每帧 300~700ms）。
+ *
+ * 地址由 [Endpoint] 决定：局域网直连设备，远程走 NAS 隧道 + 服务器 Nginx。
  */
 object SparkApi {
 
@@ -23,31 +25,51 @@ object SparkApi {
         val rot: Boolean
     )
 
-    private fun connect(host: String, port: Int, path: String, timeoutMs: Int): HttpURLConnection {
-        val conn = URL("http://$host:$port$path").openConnection() as HttpURLConnection
-        conn.connectTimeout = timeoutMs
-        conn.readTimeout = timeoutMs
+    private fun connect(
+        endpoint: Endpoint,
+        path: String,
+        timeoutMs: Int,
+        cam: Boolean = false
+    ): HttpURLConnection {
+        val url = if (cam) endpoint.camUrl(path) else endpoint.ctrlUrl(path)
+        val conn = URL(url).openConnection() as HttpURLConnection
+        val timeout = endpoint.timeout(timeoutMs)
+        conn.connectTimeout = timeout
+        conn.readTimeout = timeout
         conn.requestMethod = "GET"
         conn.useCaches = false
         conn.setRequestProperty("Connection", "close")
+        endpoint.authorization?.let { conn.setRequestProperty("Authorization", it) }
         return conn
     }
 
-    private fun getText(host: String, port: Int, path: String, timeoutMs: Int = 2500): String {
-        val conn = connect(host, port, path, timeoutMs)
+    private fun getText(
+        endpoint: Endpoint,
+        path: String,
+        timeoutMs: Int = 2500,
+        cam: Boolean = false
+    ): String {
+        val conn = connect(endpoint, path, timeoutMs, cam)
         return try {
-            if (conn.responseCode !in 200..299) error("HTTP ${conn.responseCode}")
+            val code = conn.responseCode
+            if (code !in 200..299) error(describe(code))
             conn.inputStream.bufferedReader().use { it.readText() }
         } finally {
             conn.disconnect()
         }
     }
 
-    fun status(host: String, timeoutMs: Int = 2500): Status {
-        val j = JSONObject(getText(host, CTRL_PORT, "/status", timeoutMs))
+    /** 401/403 在远程模式下几乎都是账号密码不对，直接说清楚，别让人去查隧道。 */
+    private fun describe(code: Int): String = when (code) {
+        401, 403 -> "HTTP $code：远程账号或密码不对"
+        else -> "HTTP $code"
+    }
+
+    fun status(endpoint: Endpoint, timeoutMs: Int = 2500): Status {
+        val j = JSONObject(getText(endpoint, "/status", timeoutMs))
         require(j.optBoolean("ok", false)) { "设备返回异常" }
         return Status(
-            ip = j.optString("ip", host),
+            ip = j.optString("ip", endpoint.label),
             x = j.optDouble("x", 0.0).toFloat(),
             y = j.optDouble("y", 0.0).toFloat(),
             uptimeSec = j.optLong("uptime_s", 0L),
@@ -56,28 +78,33 @@ object SparkApi {
         )
     }
 
-    fun move(host: String, x: Float, y: Float, timeoutMs: Int = 1500) {
-        getText(host, CTRL_PORT, "/move?x=${fmt(x)}&y=${fmt(y)}", timeoutMs)
+    fun move(endpoint: Endpoint, x: Float, y: Float, timeoutMs: Int = 1500) {
+        getText(endpoint, "/move?x=${fmt(x)}&y=${fmt(y)}", timeoutMs)
     }
 
-    fun stop(host: String, timeoutMs: Int = 1500) {
-        getText(host, CTRL_PORT, "/stop", timeoutMs)
+    fun stop(endpoint: Endpoint, timeoutMs: Int = 1500) {
+        getText(endpoint, "/stop", timeoutMs)
     }
 
-    fun raw(host: String, command: String, timeoutMs: Int = 2000) {
-        getText(host, CTRL_PORT, "/cmd?c=${java.net.URLEncoder.encode(command, "UTF-8")}", timeoutMs)
+    fun raw(endpoint: Endpoint, command: String, timeoutMs: Int = 2000) {
+        getText(
+            endpoint,
+            "/cmd?c=${java.net.URLEncoder.encode(command, "UTF-8")}",
+            timeoutMs
+        )
     }
 
-    fun setRotation(host: String, on: Boolean, timeoutMs: Int = 2000): String =
-        getText(host, CTRL_PORT, "/rot?on=${if (on) 1 else 0}", timeoutMs)
+    fun setRotation(endpoint: Endpoint, on: Boolean, timeoutMs: Int = 2000): String =
+        getText(endpoint, "/rot?on=${if (on) 1 else 0}", timeoutMs)
 
-    fun toggleRotation(host: String, timeoutMs: Int = 2000): String =
-        getText(host, CTRL_PORT, "/rot", timeoutMs)
+    fun toggleRotation(endpoint: Endpoint, timeoutMs: Int = 2000): String =
+        getText(endpoint, "/rot", timeoutMs)
 
-    fun snapshot(host: String, timeoutMs: Int = 8000): ByteArray {
-        val conn = connect(host, CAM_PORT, "/snapshot", timeoutMs)
+    fun snapshot(endpoint: Endpoint, timeoutMs: Int = 8000): ByteArray {
+        val conn = connect(endpoint, "/snapshot", timeoutMs, cam = true)
         return try {
-            if (conn.responseCode !in 200..299) error("HTTP ${conn.responseCode}")
+            val code = conn.responseCode
+            if (code !in 200..299) error(describe(code))
             val out = ByteArrayOutputStream(64 * 1024)
             conn.inputStream.use { input ->
                 val buf = ByteArray(16 * 1024)

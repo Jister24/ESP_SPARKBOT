@@ -21,6 +21,8 @@ import com.shike.sparkbot.data.Device
 import com.shike.sparkbot.data.DeviceStore
 import com.shike.sparkbot.media.PhotoSaver
 import com.shike.sparkbot.net.Discovery
+import com.shike.sparkbot.net.Endpoint
+import com.shike.sparkbot.net.LinkMode
 import com.shike.sparkbot.net.MjpegStreamer
 import com.shike.sparkbot.net.SparkApi
 import kotlinx.coroutines.Dispatchers
@@ -55,10 +57,28 @@ data class UiState(
     val webProgress: Int = 0,
     val webTitle: String = "官方控制台",
     val webCanGoBack: Boolean = false,
-    val rotBusy: Boolean = false
+    val rotBusy: Boolean = false,
+    val mode: LinkMode = LinkMode.LAN,
+    val remoteHost: String = DeviceStore.DEFAULT_REMOTE_HOST,
+    val remoteUser: String = DeviceStore.DEFAULT_REMOTE_USER,
+    val remotePass: String = DeviceStore.DEFAULT_REMOTE_PASS
 ) {
     val online: Boolean get() = status != null
     val current: Device? get() = devices.firstOrNull { it.ip == currentIp }
+
+    /** 远程模式下没有「当前设备」，只要服务器地址填了就能连。 */
+    val hasTarget: Boolean
+        get() = when (mode) {
+            LinkMode.LAN -> currentIp != null
+            LinkMode.REMOTE -> remoteHost.isNotBlank()
+        }
+
+    /** 状态栏/标题里显示的连接目标。 */
+    val targetLabel: String
+        get() = when (mode) {
+            LinkMode.LAN -> currentIp ?: ""
+            LinkMode.REMOTE -> remoteHost
+        }
 
     /** 设备端是否开启 180° 转正（固件持久化在 NVS，App 只读）。 */
     val deviceRot: Boolean get() = status?.rot ?: true
@@ -71,7 +91,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         UiState(
             devices = store.devices(),
             currentIp = store.currentIp(),
-            speed = store.speed()
+            speed = store.speed(),
+            mode = store.mode(),
+            remoteHost = store.remoteHost(),
+            remoteUser = store.remoteUser(),
+            remotePass = store.remotePass()
         )
     )
     val state = _state.asStateFlow()
@@ -87,24 +111,77 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private var webView: WebView? = null
 
     init {
-        if (_state.value.currentIp == null) {
+        if (_state.value.mode == LinkMode.REMOTE) {
+            startPolling()
+        } else if (_state.value.currentIp == null) {
             _state.value.devices.firstOrNull()?.let { selectDevice(it.ip, notify = false) }
         } else {
             startPolling()
         }
-        if (_state.value.devices.isEmpty()) {
+        if (_state.value.devices.isEmpty() && _state.value.mode == LinkMode.LAN) {
             viewModelScope.launch { scan() }
+        }
+    }
+
+    // ---------------- 连接方式 ----------------
+
+    /** 当前应该连哪里；没配好目标时返回 null，调用方直接放弃这一轮。 */
+    private fun endpoint(): Endpoint? = when (_state.value.mode) {
+        LinkMode.LAN -> _state.value.currentIp?.let { Endpoint.Lan(it) }
+        LinkMode.REMOTE -> _state.value.remoteHost
+            .takeIf { it.isNotBlank() }
+            ?.let { Endpoint.Remote(it, _state.value.remoteUser, _state.value.remotePass) }
+    }
+
+    fun setMode(mode: LinkMode) {
+        if (_state.value.mode == mode) return
+        stopCamera()
+        stopMotion()
+        store.setMode(mode)
+        _state.update { it.copy(mode = mode, status = null, latencyMs = null) }
+        if (mode == LinkMode.REMOTE) {
+            startPolling()
+            emit("已切换到远程访问：${_state.value.remoteHost}")
+        } else {
+            startPolling()
+            emit("已切换到局域网直连")
+        }
+    }
+
+    /** 远程服务器地址与账号；填完立刻重连一次，省得用户再去手动刷新。 */
+    fun updateRemote(host: String, user: String, pass: String) {
+        store.setRemote(host, user, pass)
+        _state.update {
+            it.copy(
+                remoteHost = host.trim(),
+                remoteUser = user.trim(),
+                remotePass = pass.trim(),
+                status = null,
+                latencyMs = null
+            )
+        }
+        if (_state.value.mode == LinkMode.REMOTE) {
+            stopCamera()
+            startPolling()
+            refreshStatus()
         }
     }
 
     // ---------------- 设备 ----------------
 
     fun selectDevice(ip: String, notify: Boolean = true) {
-        if (_state.value.currentIp == ip && pollJob != null) return
+        if (_state.value.currentIp == ip &&
+            _state.value.mode == LinkMode.LAN &&
+            pollJob != null
+        ) return
         stopCamera()
         stopMotion()
         store.setCurrentIp(ip)
-        _state.update { it.copy(currentIp = ip, status = null, latencyMs = null) }
+        // 选设备意味着肯定在局域网里，顺手把模式切回来，省掉用户再点一次
+        store.setMode(LinkMode.LAN)
+        _state.update {
+            it.copy(currentIp = ip, mode = LinkMode.LAN, status = null, latencyMs = null)
+        }
         startPolling()
         if (notify) emit("已切换到 $ip")
     }
@@ -126,7 +203,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         selectDevice(ip)
         viewModelScope.launch {
             val st = withContext(Dispatchers.IO) {
-                runCatching { SparkApi.status(ip, 2000) }.getOrNull()
+                runCatching { SparkApi.status(Endpoint.Lan(ip), 2000) }.getOrNull()
             }
             if (st == null) emit("已保存 $ip，但暂时连不上") else emit("已连接 $ip")
         }
@@ -154,6 +231,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     @SuppressLint("MissingPermission")
     fun scan() {
         if (_state.value.scanning) return
+        if (_state.value.mode == LinkMode.REMOTE) {
+            emit("远程模式不用扫描，切回局域网再扫")
+            return
+        }
         viewModelScope.launch {
             _state.update { it.copy(scanning = true, scanDone = 0) }
             val prefix = Discovery.localPrefix()
@@ -195,13 +276,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun startPolling() {
         pollJob?.cancel()
-        val ip = _state.value.currentIp ?: return
+        if (endpoint() == null) return
         pollJob = viewModelScope.launch {
             var failures = 0
             while (isActive) {
+                val ep = endpoint() ?: break
                 val begin = SystemClock.elapsedRealtime()
                 val status = withContext(Dispatchers.IO) {
-                    runCatching { SparkApi.status(ip, STATUS_TIMEOUT_MS) }.getOrNull()
+                    runCatching { SparkApi.status(ep, STATUS_TIMEOUT_MS) }.getOrNull()
                 }
                 val cost = (SystemClock.elapsedRealtime() - begin).toInt()
                 if (status != null) {
@@ -210,6 +292,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 } else {
                     // 设备忙（图传编码 / 停流后刷屏）时 /status 要 1~2 秒才回，
                     // 连着失败 3 次才算离线，否则方向键会莫名其妙变灰。
+                    // 远程多两跳，再宽一次。
                     failures += 1
                     if (failures >= 3) {
                         _state.update { it.copy(status = null, latencyMs = null) }
@@ -221,11 +304,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun refreshStatus() {
-        val ip = _state.value.currentIp ?: return
+        if (endpoint() == null) return
         viewModelScope.launch {
+            val ep = endpoint() ?: return@launch
             val begin = SystemClock.elapsedRealtime()
             val status = withContext(Dispatchers.IO) {
-                runCatching { SparkApi.status(ip, STATUS_TIMEOUT_MS) }.getOrNull()
+                runCatching { SparkApi.status(ep, STATUS_TIMEOUT_MS) }.getOrNull()
             }
             if (status != null) {
                 _state.update {
@@ -243,16 +327,17 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     // ---------------- 运动 ----------------
 
     fun startHold(x: Float, y: Float) {
-        val ip = _state.value.currentIp ?: return
+        if (endpoint() == null) return
         holdJob?.cancel()
         _state.update { it.copy(holding = true, holdVector = x to y) }
         holdJob = viewModelScope.launch {
             var failures = 0
             var warned = false
             while (isActive) {
+                val ep = endpoint() ?: break
                 val speed = _state.value.speed
                 val ok = withContext(Dispatchers.IO) {
-                    runCatching { SparkApi.move(ip, x * speed, y * speed) }.isSuccess
+                    runCatching { SparkApi.move(ep, x * speed, y * speed) }.isSuccess
                 }
                 if (ok) {
                     failures = 0
@@ -274,9 +359,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(holding = false, holdVector = null) }
         holdJob?.cancel()
         holdJob = null
-        val ip = _state.value.currentIp ?: return
+        val ep = endpoint() ?: return
         viewModelScope.launch(Dispatchers.IO) {
-            runCatching { SparkApi.stop(ip) }
+            runCatching { SparkApi.stop(ep) }
         }
     }
 
@@ -286,19 +371,19 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun dance() {
-        val ip = _state.value.currentIp ?: return
+        val ep = endpoint() ?: return
         viewModelScope.launch(Dispatchers.IO) {
-            runCatching { SparkApi.raw(ip, "d1") }
+            runCatching { SparkApi.raw(ep, "d1") }
                 .onFailure { emit("指令发送失败") }
         }
         emit("开始跳舞，约 17 秒内底盘不响应指令")
     }
 
     fun setLight(mode: Int) {
-        val ip = _state.value.currentIp ?: return
+        val ep = endpoint() ?: return
         _state.update { it.copy(lightMode = mode) }
         viewModelScope.launch(Dispatchers.IO) {
-            runCatching { SparkApi.raw(ip, "w$mode") }
+            runCatching { SparkApi.raw(ep, "w$mode") }
                 .onFailure { emit("灯光指令发送失败") }
         }
     }
@@ -311,7 +396,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      * 开关状态存在设备 NVS（rot180），换手机/重装 App 也不会丢。
      */
     fun toggleDeviceRotation() {
-        val ip = _state.value.currentIp ?: return
+        val ep = endpoint() ?: return
         if (!_state.value.online) {
             emit("设备离线，先检查连接")
             return
@@ -321,7 +406,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(rotBusy = true) }
         viewModelScope.launch {
             val reply = withContext(Dispatchers.IO) {
-                runCatching { SparkApi.setRotation(ip, target) }.getOrNull()
+                runCatching { SparkApi.setRotation(ep, target) }.getOrNull()
             }
             if (reply == null) {
                 _state.update { it.copy(rotBusy = false) }
@@ -342,7 +427,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     // ---------------- 图传 / 拍照 ----------------
 
     fun startCamera() {
-        val ip = _state.value.currentIp ?: return
+        val ep = endpoint() ?: return
         if (streamer != null) return
         // 不拿 /status 当门槛：设备忙时状态查询会超时，但图传本身是好的，
         // 连不上由 MjpegStreamer 自己重试并报错。
@@ -350,7 +435,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         fpsMark = SystemClock.elapsedRealtime()
         frameCount = 0
         streamer = MjpegStreamer(
-            host = ip,
+            endpoint = ep,
             onFrame = { bitmap: Bitmap ->
                 frameCount += 1
                 val now = SystemClock.elapsedRealtime()
@@ -393,7 +478,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun capturePhoto() {
-        val ip = _state.value.currentIp ?: return
+        val ep = endpoint() ?: return
         if (_state.value.captureBusy) return
         viewModelScope.launch {
             _state.update { it.copy(captureBusy = true) }
@@ -404,7 +489,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 delay(250)
             }
             val bytes = withContext(Dispatchers.IO) {
-                runCatching { SparkApi.snapshot(ip) }.getOrNull()
+                runCatching { SparkApi.snapshot(ep) }.getOrNull()
             }
             if (bytes == null || bytes.size < 1024) {
                 emit("拍照失败，检查设备是否在线")
@@ -447,8 +532,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             javaScriptEnabled = true
             domStorageEnabled = true
             databaseEnabled = true
-            loadWithOverviewMode = true
+            // 控制台自己声明了 width=device-width 的 viewport，按它的来即可。
+            // 开 overviewMode 会让 WebView 先按 980px 算初始缩放再回填重排，多一次跳变。
+            loadWithOverviewMode = false
             useWideViewPort = true
+            // 系统字体放大时 WebView 会跟着 textZoom，表单里的固定宽度输入框被撑破
+            textZoom = 100
+            // 页面本身是 user-scalable=no，禁掉缩放避免双击/双指缩放的残影
+            setSupportZoom(false)
+            builtInZoomControls = false
+            displayZoomControls = false
             cacheMode = WebSettings.LOAD_DEFAULT
             mediaPlaybackRequiresUserGesture = false
             mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE

@@ -1,6 +1,7 @@
 package com.shike.sparkbot.data
 
 import android.content.Context
+import com.shike.sparkbot.net.LinkMode
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -54,10 +55,45 @@ class DeviceStore(context: Context) {
 
     fun setSpeed(v: Float) = sp.edit().putFloat(KEY_SPEED, v).apply()
 
+    // ---------------- 连接方式 ----------------
+
+    fun mode(): LinkMode =
+        if (sp.getString(KEY_MODE, "lan") == "remote") LinkMode.REMOTE else LinkMode.LAN
+
+    fun setMode(mode: LinkMode) {
+        sp.edit().putString(KEY_MODE, if (mode == LinkMode.REMOTE) "remote" else "lan").apply()
+    }
+
+    fun remoteHost(): String = sp.getString(KEY_REMOTE_HOST, DEFAULT_REMOTE_HOST)
+        ?: DEFAULT_REMOTE_HOST
+
+    fun remoteUser(): String = sp.getString(KEY_REMOTE_USER, DEFAULT_REMOTE_USER)
+        ?: DEFAULT_REMOTE_USER
+
+    fun remotePass(): String = sp.getString(KEY_REMOTE_PASS, DEFAULT_REMOTE_PASS)
+        ?: DEFAULT_REMOTE_PASS
+
+    fun setRemote(host: String, user: String, pass: String) {
+        sp.edit()
+            .putString(KEY_REMOTE_HOST, host.trim())
+            .putString(KEY_REMOTE_USER, user.trim())
+            .putString(KEY_REMOTE_PASS, pass.trim())
+            .apply()
+    }
+
     companion object {
         private const val KEY_LIST = "devices"
         private const val KEY_CURRENT = "current_ip"
         private const val KEY_SPEED = "speed"
+        private const val KEY_MODE = "link_mode"
+        private const val KEY_REMOTE_HOST = "remote_host"
+        private const val KEY_REMOTE_USER = "remote_user"
+        private const val KEY_REMOTE_PASS = "remote_pass"
+
+        /** 默认值就是已经部署好的那套（见 NAS 上 Docker/frpc/access.txt），改过就在界面上改。 */
+        const val DEFAULT_REMOTE_HOST = "bot.example.com"
+        const val DEFAULT_REMOTE_USER = "sparkbot"
+        const val DEFAULT_REMOTE_PASS = ""
 
         fun defaultName(ip: String): String = "SparkBot ${ip.substringAfterLast('.')}"
     }
