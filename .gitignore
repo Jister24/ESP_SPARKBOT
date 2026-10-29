@@ -1,0 +1,17 @@
+# 构建产物
+android/app/build/
+android/build/
+android/.gradle/
+android/local.properties
+*.apk
+*.aab
+
+# 二进制/备份（体积大，不入库）
+backup/*.bin
+*.bin
+
+# 缓存
+__pycache__/
+*.pyc
+.DS_Store
+.claude/

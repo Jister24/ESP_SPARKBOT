@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 机器人头部 -->
+    <path
+        android:pathData="M35,42 L73,42 A7,7 0 0 1 80,49 L80,70 A7,7 0 0 1 73,77 L35,77 A7,7 0 0 1 28,70 L28,49 A7,7 0 0 1 35,42 Z"
+        android:strokeColor="#5B93FF"
+        android:strokeWidth="3.5"
+        android:fillColor="#16203A" />
+    <!-- 天线 -->
+    <path
+        android:pathData="M54,42 L54,34"
+        android:strokeColor="#5B93FF"
+        android:strokeWidth="3"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M54,31 m-3.2,0 a3.2,3.2 0 1,0 6.4,0 a3.2,3.2 0 1,0 -6.4,0"
+        android:fillColor="#35D0BA" />
+    <!-- 眼睛 -->
+    <path
+        android:pathData="M43,58 m-4,0 a4,4 0 1,0 8,0 a4,4 0 1,0 -8,0"
+        android:fillColor="#E8EDF5" />
+    <path
+        android:pathData="M65,58 m-4,0 a4,4 0 1,0 8,0 a4,4 0 1,0 -8,0"
+        android:fillColor="#E8EDF5" />
+    <!-- 摄像头 -->
+    <path
+        android:pathData="M54,68 m-5,0 a5,5 0 1,0 10,0 a5,5 0 1,0 -10,0"
+        android:fillColor="#5B93FF" />
+</vector>
