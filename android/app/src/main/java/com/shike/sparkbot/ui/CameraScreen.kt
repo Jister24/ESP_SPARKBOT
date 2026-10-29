@@ -147,7 +147,7 @@ fun CameraScreen(state: UiState, vm: AppViewModel) {
                         .padding(horizontal = 8.dp, vertical = 4.dp)
                 ) {
                     Text(
-                        if (state.flipVertical) "640×480 · 已翻转" else "640×480 · 原始",
+                        if (state.deviceRot) "设备 180°" else "原始方向",
                         color = Color.White, fontSize = 10.sp
                     )
                 }
@@ -200,15 +200,21 @@ fun CameraScreen(state: UiState, vm: AppViewModel) {
                 Text("重连图传", color = TextMain, fontSize = 12.sp, maxLines = 1)
             }
             Button(
-                onClick = { vm.toggleFlipVertical() },
+                onClick = { vm.toggleDeviceRotation() },
                 modifier = Modifier.weight(1f).height(44.dp),
                 shape = RoundedCornerShape(13.dp),
+                enabled = state.online && !state.rotBusy,
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 4.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = SurfaceHigh)
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = SurfaceHigh,
+                    disabledContainerColor = Surface,
+                    disabledContentColor = TextMuted
+                )
             ) {
                 Text(
-                    if (state.flipVertical) "恢复原始画面" else "上下翻转",
-                    color = TextMain, fontSize = 12.sp, maxLines = 1
+                    if (state.deviceRot) "恢复原始方向" else "画面翻转",
+                    color = if (state.online && !state.rotBusy) TextMain else TextMuted,
+                    fontSize = 12.sp, maxLines = 1
                 )
             }
             Button(
@@ -241,7 +247,8 @@ fun CameraScreen(state: UiState, vm: AppViewModel) {
         }
 
         Text(
-            "图传与抓图共用 8081 端口，拍照时预览会短暂中断约 1 秒。照片存放在相册 Pictures/SparkBot。",
+            "画面方向由设备端处理（固件每帧转 180°），图传、拍照和机器人的小屏始终一致。\n" +
+                "图传与抓图共用 8081 端口，拍照时预览会短暂中断约 1 秒。照片存放在相册 Pictures/SparkBot。",
             color = TextMuted, fontSize = 11.sp, lineHeight = 18.sp
         )
         Spacer(Modifier.height(24.dp))

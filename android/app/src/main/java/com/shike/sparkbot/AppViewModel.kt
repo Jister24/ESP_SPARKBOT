@@ -19,7 +19,6 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.shike.sparkbot.data.Device
 import com.shike.sparkbot.data.DeviceStore
-import com.shike.sparkbot.media.ImageOps
 import com.shike.sparkbot.media.PhotoSaver
 import com.shike.sparkbot.net.Discovery
 import com.shike.sparkbot.net.MjpegStreamer
@@ -56,10 +55,13 @@ data class UiState(
     val webProgress: Int = 0,
     val webTitle: String = "官方控制台",
     val webCanGoBack: Boolean = false,
-    val flipVertical: Boolean = true
+    val rotBusy: Boolean = false
 ) {
     val online: Boolean get() = status != null
     val current: Device? get() = devices.firstOrNull { it.ip == currentIp }
+
+    /** 设备端是否开启 180° 转正（固件持久化在 NVS，App 只读）。 */
+    val deviceRot: Boolean get() = status?.rot ?: true
 }
 
 class AppViewModel(app: Application) : AndroidViewModel(app) {
@@ -69,8 +71,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         UiState(
             devices = store.devices(),
             currentIp = store.currentIp(),
-            speed = store.speed(),
-            flipVertical = store.flipVertical()
+            speed = store.speed()
         )
     )
     val state = _state.asStateFlow()
@@ -292,27 +293,39 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * 算出这一帧要做的翻转组合。
+     * 切换画面方向 —— 直接下发到设备，App 不做任何图像处理。
      *
-     * 期望结果 T = 是否上下翻转；设备实际输出 D = 是否 180°（= 水平+垂直）。
-     * 水平和垂直翻转都对合，所以：
-     *   水平 = 设备 180°；  垂直 = 设备 180° 与「想要上下翻转」异或。
-     * 四种组合（设备开/关 × 想要/不想要）都能被这一组标志覆盖，
-     * 既不用改设备状态，也不影响它自己的 LCD 预览和云端拍照。
+     * 固件在 Capture() 里每帧转 180°，所以改完下一帧就生效，不用重连图传；
+     * LCD 预览、云端拍照、App 图传共用同一份数据，方向天然一致。
+     * 开关状态存在设备 NVS（rot180），换手机/重装 App 也不会丢。
      */
-    private fun flipFlags(): Pair<Boolean, Boolean> {
-        val deviceRot = _state.value.status?.rot ?: false
-        val wantVertical = _state.value.flipVertical
-        return deviceRot to (deviceRot xor wantVertical)
-    }
-
-    /** 切换画面的上下翻转（App 侧处理，不动固件）。 */
-    fun toggleFlipVertical() {
-        val target = !_state.value.flipVertical
-        _state.update { it.copy(flipVertical = target) }
-        store.setFlipVertical(target)
-        restartCamera()
-        emit(if (target) "画面已上下翻转" else "已恢复原始画面")
+    fun toggleDeviceRotation() {
+        val ip = _state.value.currentIp ?: return
+        if (!_state.value.online) {
+            emit("设备离线，先检查连接")
+            return
+        }
+        if (_state.value.rotBusy) return
+        val target = !_state.value.deviceRot
+        _state.update { it.copy(rotBusy = true) }
+        viewModelScope.launch {
+            val reply = withContext(Dispatchers.IO) {
+                runCatching { SparkApi.setRotation(ip, target) }.getOrNull()
+            }
+            if (reply == null) {
+                _state.update { it.copy(rotBusy = false) }
+                emit("切换失败，检查设备连接")
+                return@launch
+            }
+            // 固件回 {"rot":true/false}，以设备实际状态为准
+            val actual = runCatching {
+                org.json.JSONObject(reply).optBoolean("rot", target)
+            }.getOrDefault(target)
+            _state.update { st ->
+                st.copy(rotBusy = false, status = st.status?.copy(rot = actual))
+            }
+            emit(if (actual) "设备画面已 180° 转正" else "设备画面已恢复原始方向")
+        }
     }
 
     // ---------------- 图传 / 拍照 ----------------
@@ -341,9 +354,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     _state.value.fps
                 }
                 _state.update {
-                    val (h, v) = flipFlags()
-                    val shown = runCatching { ImageOps.transform(bitmap, h, v) }.getOrDefault(bitmap)
-                    it.copy(frame = shown.asImageBitmap(), fps = fps, cameraError = null)
+                    it.copy(frame = bitmap.asImageBitmap(), fps = fps, cameraError = null)
                 }
             },
             onState = { connected, message ->
@@ -391,9 +402,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             } else {
                 val path = runCatching {
                     withContext(Dispatchers.IO) {
-                        val (h, v) = flipFlags()
-                        val out = ImageOps.transformJpeg(bytes, h, v) ?: bytes
-                        PhotoSaver.saveJpeg(getApplication(), out)
+                        // 方向已由设备端转好，照片原样存盘，不再二次编码
+                        PhotoSaver.saveJpeg(getApplication(), bytes)
                     }
                 }.getOrNull()
                 if (path != null) {

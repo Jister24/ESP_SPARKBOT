@@ -189,7 +189,7 @@ private fun CurrentDevicePanel(state: UiState, vm: AppViewModel) {
                 }
                 Spacer(Modifier.weight(1f))
                 Text(
-                    if (state.flipVertical) "画面上下翻转" else "原始方向",
+                    if (state.deviceRot) "画面已 180° 转正" else "原始方向",
                     color = TextMuted, fontSize = 11.sp
                 )
             }

@@ -54,16 +54,10 @@ class DeviceStore(context: Context) {
 
     fun setSpeed(v: Float) = sp.edit().putFloat(KEY_SPEED, v).apply()
 
-    /** 画面是否需要上下翻转。板载摄像头装反，默认开启。 */
-    fun flipVertical(): Boolean = sp.getBoolean(KEY_FLIP, true)
-
-    fun setFlipVertical(v: Boolean) = sp.edit().putBoolean(KEY_FLIP, v).apply()
-
     companion object {
         private const val KEY_LIST = "devices"
         private const val KEY_CURRENT = "current_ip"
         private const val KEY_SPEED = "speed"
-        private const val KEY_FLIP = "flip_vertical"
 
         fun defaultName(ip: String): String = "SparkBot ${ip.substringAfterLast('.')}"
     }

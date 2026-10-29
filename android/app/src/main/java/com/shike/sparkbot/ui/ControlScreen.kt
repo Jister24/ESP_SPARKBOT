@@ -126,14 +126,20 @@ fun ControlScreen(state: UiState, vm: AppViewModel) {
                 Text("跳舞 d1", color = TextMain, fontSize = 13.sp)
             }
             Button(
-                onClick = { vm.toggleFlipVertical() },
+                onClick = { vm.toggleDeviceRotation() },
                 modifier = Modifier.weight(1f).height(46.dp),
                 shape = RoundedCornerShape(14.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = SurfaceHigh)
+                enabled = state.online && !state.rotBusy,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = SurfaceHigh,
+                    disabledContainerColor = Surface,
+                    disabledContentColor = TextMuted
+                )
             ) {
                 Text(
-                    if (state.flipVertical) "画面：上下翻转" else "画面：原始",
-                    color = TextMain, fontSize = 13.sp
+                    if (state.deviceRot) "画面：已转正" else "画面：原始",
+                    color = if (state.online && !state.rotBusy) TextMain else TextMuted,
+                    fontSize = 13.sp
                 )
             }
         }
