@@ -581,7 +581,97 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
         view.loadUrl(CONSOLE_URL)
         webView = view
+        installVhFix(view)
         return view
+    }
+
+    /**
+     * 修小智控制台弹窗在 WebView 里塌成一条缝的问题。
+     *
+     * 根因不在页面，而在这个 WebView 内核：`100vh` / `100dvh` / `52vh` 全部算成 0，
+     * 而 innerHeight 明明是 710（用 `height:400px` 做对照量得 400，说明只有视口单位是坏的）。
+     * 控制台的配置弹窗恰好用 `supports-[height:100dvh]:h-[100dvh]` 和
+     * `h-[min(46rem,calc(100vh-2rem))]` 定高，于是高度归零，标题、标签、取消保存
+     * 全部溢出叠在一起。
+     *
+     * 内核改不了，只能在页面加载后把样式表里的 vh 单位就地改写成实测像素。
+     * 原始值缓存起来，旋屏、键盘弹出时按新的视口高度重算。
+     */
+    private fun installVhFix(view: WebView) {
+        val js = """(function(){
+          var RULE=/([\d.]+)\s*(dvh|svh|lvh|vh)(?![\w-])/;
+          var ALL=/([\d.]+)\s*(dvh|svh|lvh|vh)(?![\w-])/g;
+          var cache=window.__wbVhCache||(window.__wbVhCache=new WeakMap());
+          function fixAll(){
+            var H=Math.round((window.visualViewport&&visualViewport.height)||innerHeight||0);
+            if(!H) return 0;
+            var n=0;
+            function apply(rule,p,orig){
+              var nv=orig.replace(ALL,function(_,num){
+                return (parseFloat(num)/100*H).toFixed(2)+'px';
+              });
+              try{
+                rule.style.setProperty(p,nv,rule.style.getPropertyPriority(p));
+                n++;
+              }catch(e){}
+            }
+            function walk(rules){
+              for(var i=0;i<rules.length;i++){
+                var r=rules[i];
+                if(r.cssRules&&r.cssRules.length){walk(r.cssRules);continue;}
+                var st=r.style; if(!st) continue;
+                var orig=cache.get(r);
+                if(orig){
+                  for(var p in orig) apply(r,p,orig[p]);
+                  continue;
+                }
+                var props=[];
+                for(var k=0;k<st.length;k++) props.push(st[k]);
+                var found=null;
+                for(var k=0;k<props.length;k++){
+                  var p=props[k], v=st.getPropertyValue(p);
+                  if(!v||!RULE.test(v)) continue;
+                  if(!found) found={};
+                  found[p]=v;
+                }
+                if(found){
+                  cache.set(r,found);
+                  for(var p in found) apply(r,p,found[p]);
+                }
+              }
+            }
+            for(var s=0;s<document.styleSheets.length;s++){
+              var rs=null;
+              try{rs=document.styleSheets[s].cssRules}catch(e){continue}
+              if(rs) walk(rs);
+            }
+            return n;
+          }
+          window.__wbVh=fixAll;
+          var changed=fixAll();
+          try{
+            addEventListener('resize',function(){setTimeout(fixAll,150)});
+            addEventListener('orientationchange',function(){setTimeout(fixAll,350)});
+            // 控制台是 SPA，切路由可能再插 <style>，补一次
+            new MutationObserver(function(){
+              clearTimeout(window.__wbVhT);
+              window.__wbVhT=setTimeout(fixAll,300);
+            }).observe(document.head,{childList:true,subtree:true});
+          }catch(e){}
+          return changed;
+        })()"""
+        var n = 0
+        val task = object : Runnable {
+            override fun run() {
+                n++
+                if (n > 6) return
+                view.evaluateJavascript(js) { r ->
+                    android.util.Log.i("SPARKVH", "pass#$n changed=$r")
+                }
+                view.postDelayed(this, if (n <= 3) 700L else 2500L)
+            }
+        }
+        view.postDelayed(task, 600)
     }
 
     fun accountGoBack(): Boolean {

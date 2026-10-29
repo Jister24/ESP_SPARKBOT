@@ -61,7 +61,9 @@ fun AccountScreen(state: UiState, vm: AppViewModel) {
 
         AndroidView(
             factory = { ctx -> vm.accountWebView(ctx) },
-            modifier = Modifier.fillMaxSize()
+            // weight 占剩余高度，不用 fillMaxSize()：后者在 Column 里按整屏高度测量，
+            // WebView 会比可见区域高一截，页面底部吸底的东西会被系统导航条挡住。
+            modifier = Modifier.fillMaxWidth().weight(1f)
         )
     }
 }
