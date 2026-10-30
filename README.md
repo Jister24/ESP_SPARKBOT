@@ -87,10 +87,10 @@ idf.py build flash monitor
 **Android App**（`android/`，Kotlin + Jetpack Compose，包名 `com.shike.sparkbot`，
 minSdk 26 / targetSdk 35）。
 
-不想编译就直接装 → **[下载 APK](https://raw.githubusercontent.com/Jister24/ESP_SPARKBOT/dist/sparkbot-1.0.0-debug.apk)**
+不想编译就直接装 → **[下载 APK](https://github.com/Jister24/ESP_SPARKBOT/releases/latest)**
 （9.2 MB，debug 签名，安装时需允许「未知来源」）。
 
-> APK 与源码分开存：`main` 分支不含任何构建产物，APK 放在单独的 `dist` 分支。
+> `main` 分支不含任何构建产物，APK 只作为 Release 附件发布。
 > 下载后建议核对一下（`shasum -a 256 文件名`，Windows 用 `certutil -hashfile 文件名 SHA256`）：
 >
 > ```
