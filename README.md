@@ -84,7 +84,20 @@ idf.py build flash monitor
 
 ### 2. 选一个控制端
 
-**Android App**（`android/`，Kotlin + Jetpack Compose，包名 `com.shike.sparkbot`）：
+**Android App**（`android/`，Kotlin + Jetpack Compose，包名 `com.shike.sparkbot`，
+minSdk 26 / targetSdk 35）。
+
+不想编译就直接装 → **[下载 APK](https://raw.githubusercontent.com/Jister24/ESP_SPARKBOT/dist/sparkbot-1.0.0-debug.apk)**
+（9.2 MB，debug 签名，安装时需允许「未知来源」）。
+
+> APK 与源码分开存：`main` 分支不含任何构建产物，APK 放在单独的 `dist` 分支。
+> 下载后建议核对一下（`shasum -a 256 文件名`，Windows 用 `certutil -hashfile 文件名 SHA256`）：
+>
+> ```
+> 03cfc023b793e07eb41a84d53098caed8a3ca6bb30396f439b69a89fd55949a7
+> ```
+
+自己编译：
 
 ```bash
 cd android && ./gradlew assembleDebug
