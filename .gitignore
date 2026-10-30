@@ -1,17 +1,60 @@
-# 构建产物
-android/app/build/
-android/build/
-android/.gradle/
-android/local.properties
+# ---------- macOS / 编辑器 ----------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.iml
+*.swp
+*~
+
+# ---------- Android / Gradle 构建产物 ----------
+build/
+.gradle/
+captures/
+.externalNativeBuild
+.cxx/
+local.properties
+android/app/release/
 *.apk
 *.aab
+*.ap_
+*.dex
 
-# 二进制/备份（体积大，不入库）
-backup/*.bin
+# 签名材料绝不入库
+*.jks
+*.keystore
+keystore.properties
+signing.properties
+
+# ---------- ESP-IDF ----------
+# 上游同样忽略 sdkconfig：板级默认值走 boards/<board>/config.json
+sdkconfig
+sdkconfig.old
+managed_components/
+dependencies.lock
+
+# ---------- 二进制与镜像（体积大，不入库） ----------
 *.bin
+*.elf
+*.map
 
-# 缓存
+# ---------- Python ----------
 __pycache__/
-*.pyc
-.DS_Store
+*.py[cod]
+.venv/
+venv/
+
+# ---------- 日志与临时文件 ----------
+*.log
+*.bak
+*.orig
+*.rej
+
+# ---------- 本地内部记录（不属于项目源码） ----------
+# 含真实域名、内网 IP、凭据与调试过程，只保留在本机
+.workbuddy/
 .claude/
+
+# ---------- 含个人信息的设备快照 ----------
+# 记录了 Wi-Fi SSID/密码、MAC、设备 UUID，不要公开
+backup/device_info.md

@@ -20,34 +20,40 @@ NAS 的局域网 IP 顺手记一下（极空间客户端 → 设备监控 → �
 
 ---
 
-## 第一步：配置已就位
+## 第一步：准备配置文件并填 token
 
-三份文件已经放进 NAS 的 `Docker/frpc/`，token 是生成好的 48 位随机串，
-`frpc.toml` 和 `frps.toml` 里是同一个值。**这一步不需要你做任何事。**
+在 NAS 共享目录下建一个文件夹（极空间里是 `我的文件/Docker/frpc`，注意目录名 `Docker`
+首字母大写），把仓库里的 `frpc.toml` 放进去，容器会把它挂载到 `/etc/frp`。
 
-以后如果想换 token（比如怀疑泄露）：
+打开 `frpc.toml`，替换三处占位符：
 
-1. 同时改 `frpc.toml` 和 `frps.toml` 的 `auth.token` 与 `webServer.password`，两边必须一致
-2. 重启 NAS 上的 frpc 容器
-3. 重启阿里云的 frps
+| 占位符 | 换成什么 |
+|---|---|
+| `bot.example.com` | 你的服务器域名 |
+| `192.168.1.50` | 设备在局域网里的固定 IP |
+| `REPLACE_WITH_RANDOM_TOKEN` | `openssl rand -hex 24` 的输出 |
 
-生成新 token：`openssl rand -hex 24`
+`auth.token` 和 `webServer.password` 用同一个随机串，并且**必须与服务器上 `frps.toml`
+里的值完全一致**——不一致的表现是容器反复重启，日志里刷
+`token in login doesn't match`。
+
+以后要换 token（比如怀疑泄露）：改两边配置 → 重启 NAS 容器 → 重启服务器 frps。
 
 **历史坑存档**：文件名不能是 `frpc.toml.txt`。Windows 隐藏已知扩展名，记事本里
-"另存为 frpc.toml"实际产出 `frpc.toml.txt`，挂载进容器后 frpc 找不到配置、启动即退，
-日志只有一句 `config file not found`。这次是直接写入 NAS 的，不存在这个问题。
+"另存为 frpc.toml" 实际产出 `frpc.toml.txt`，挂载进容器后 frpc 找不到配置、启动即退，
+日志只有一句 `config file not found`。用「显示文件扩展名」或在 NAS 里直接改后缀核对。
 
 ---
 
 ## 第二步：创建容器
 
-极空间支持 Compose，比在图形界面里逐项点快得多。配置文件已经放进 NAS 的
-`Docker/frpc/` 了，不用再上传：
+极空间支持 Compose，比在图形界面里逐项点快得多。配置文件放在共享目录里，
+容器通过卷挂载读取，不需要打进镜像：
 
 | 文件 | 用途 |
 |---|---|
-| `frpc.toml` | 容器读取的隧道配置，token 已生成并填入 |
-| `frps.toml` | 给阿里云用的服务端配置，token 与上面完全一致 |
+| `frpc.toml` | 容器读取的隧道配置，需自己填 token |
+| `frps.toml` | 给服务器用的服务端配置，token 与上面完全一致 |
 
 ⚠️ **项目目录里要留空，不能预放 `docker-compose.yml`。**
 极空间建项目时会自己往选定路径写一份 compose 文件，目录里已有同名文件就报

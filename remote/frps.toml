@@ -1,4 +1,4 @@
-# frp 服务端配置 —— 跑在阿里云 bot.example.com
+# frp 服务端配置 —— 跑在你有公网 IP 的云服务器上
 #
 # 安装：把 frps 二进制放到 /usr/local/bin，配置放 /etc/frp/frps.toml
 #      systemd 单元见 remote/README.md

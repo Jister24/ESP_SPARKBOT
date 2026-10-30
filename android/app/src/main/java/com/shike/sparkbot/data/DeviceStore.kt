@@ -90,9 +90,14 @@ class DeviceStore(context: Context) {
         private const val KEY_REMOTE_USER = "remote_user"
         private const val KEY_REMOTE_PASS = "remote_pass"
 
-        /** 默认值就是已经部署好的那套（见 NAS 上 Docker/frpc/access.txt），改过就在界面上改。 */
-        const val DEFAULT_REMOTE_HOST = "bot.example.com"
-        const val DEFAULT_REMOTE_USER = "sparkbot"
+        /**
+         * 远程接入默认留空，由使用者在「设备 → 远程」面板里自己填。
+         *
+         * 不要把凭据写进源码：这是公开仓库，硬编码的密码等同于公开的密码。
+         * 界面上填过一次就会存进 SharedPreferences，之后不用再填。
+         */
+        const val DEFAULT_REMOTE_HOST = ""
+        const val DEFAULT_REMOTE_USER = ""
         const val DEFAULT_REMOTE_PASS = ""
 
         fun defaultName(ip: String): String = "SparkBot ${ip.substringAfterLast('.')}"
