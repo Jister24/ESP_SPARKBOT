@@ -41,7 +41,7 @@
 | `Happy.eaf` | 42 | happy / laughing / funny / loving / embarrassed / confident / delicious / silly / relaxed |
 | `Sad.eaf` | 96 | sad |
 | `cry.eaf` | 43 | crying |
-| `sleep.eaf` | 118 | sleepy |
+| `sleep.eaf` | 40 | sleepy（本仓库重画：全程闭眼，见下） |
 | `angry.eaf` | 50 | angry |
 | `shocked.eaf` | 34 | surprised / shocked |
 | `confused.eaf` | 77 | thinking / confused |
@@ -59,6 +59,29 @@ python3 firmware/tools/eaf_render.py --list   # 只看清单与帧数
 
 `.eaf` 素材属于 `espressif/esp_emote_assets` 组件，不在本仓库；脚本默认去
 `~/esp/xiaozhi-esp32/managed_components/` 下找，可用 `--assets` 指定。
+
+### 睡觉这套是自己画的
+
+原厂的 `sleep.eaf` 是个变形动画：从一个大白圆（等于还睁着眼）压扁成横杠，
+切到睡觉时会有一瞬间像没闭上。这一份重画成 40 帧纯闭眼（20fps，2 秒一次呼吸），
+另外配一个 24 帧的 `zzz.eaf` 飘在左上角：
+
+![睡觉表情](docs/images/sleep-preview.png)
+
+zzz 没有画进 `sleep.eaf`，因为 `eye_anim` 是 `mirror: auto`——写进去的 z 会被镜像成
+两份、右边那份还是反的。渲染上它在 `EmoteDisplay::UpdateZzzOverlay` 里另建一个
+gfx anim 对象（`SetEmotion("sleepy")` 时 start + 显示，其它表情或聆听/说话时
+stop + 隐藏），落点 (8, 6)，正好躲开右上角的电量角标。
+
+两份素材的生成脚本（Pillow，直接产出 `.eaf`）：
+
+```bash
+python3 firmware/tools/emote_sleep.py            # 出 sleep.eaf / zzz.eaf + 上面这张预览
+python3 firmware/tools/emote_sleep.py --install  # 顺带拷进 xiaozhi 的 emote 素材目录
+```
+
+`.eaf` 的写入口径在 `firmware/tools/eaf_write.py`：8bit 调色板 + 块内 RLE（编码
+类型 0），文件头校验和是 `[16, 16+表长)` 的字节和，算错会直接 `ESP_ERR_INVALID_CRC`。
 
 ## 两条链路，一套接口
 

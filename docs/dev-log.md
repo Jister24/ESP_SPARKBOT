@@ -1328,3 +1328,85 @@ I (224783) EmoteDisplay: SetEmotion: neutral       ← curl /status 后 400ms �
 `esp32s3 + BOARD_NAME=esp-sparkbot` 编译通过（`xiaozhi.bin` 0x297d40，分区剩 34%）。
 
 顺带说明：LVGL 界面若没有 `sleepy` 素材，`SetEmotion` 只会返回 false 打条告警，不影响其他功能。
+
+## 二十五、把睡觉表情重画：全程闭眼 + zzz（2026-11-01 已烧录验证）
+
+二十四节挂上睡脸之后，问题变成「这张脸不像在睡」：原厂 `sleep.eaf` 是个**变形动画**，
+第 0 帧是一个大白圆（跟睁眼没区别），再慢慢压扁成横杠，所以刚切到睡觉时会闪一下睁眼。
+直接解帧看得很清楚：
+
+```
+帧 0    白色圆形 86×86（等于睁眼）
+帧 10   横杠 86×22
+帧 105  横杠移到上方
+```
+
+### 要改的是素材，不是代码
+
+表情名到文件的映射在 `assets/240_240/emote.json` 里，`sleepy → sleep.eaf`。所以重画
+`sleep.eaf` 就够，不用碰表情名。麻烦的是**没有现成的 .eaf 编码器**——只有解码器
+（`firmware/tools/eaf_render.py`）。于是照着 `gfx_eaf_dec.c` 反着写了一个：
+
+- 容器：`0x89 "EAF"` | 帧数 | 校验和 | 表长 | 帧表（size, offset）×n
+- 帧：`0x5A5A` | `"_S"` | 0x00 | version[6] | depth | w | h | blocks | block_h |
+  块长表 | 调色板（**B,G,R,A**）| 块数据
+- 块：首字节编码类型，`0` 是 RLE，(count, value) 对，count 是 uint8 所以最长 255
+- 校验和是 `[16, 16+表长)` 的字节和，错了直接 `ESP_ERR_INVALID_CRC`；调色板里
+  全 0 的条目解码器当透明
+
+只实现 8bit + RLE 这一条子集（`firmware/tools/eaf_write.py`），编码→解码往返
+逐像素比对 40/40、24/24 帧一致。
+
+### 画成什么样
+
+- **闭眼**：上下两条曲线夹出来的月牙，中间厚（13.5px）两头收细，随呼吸上下浮动
+  1.6px、弧度 9±1.5px，40 帧 20fps 循环 2 秒。用填充而不是描线——描等宽的线在
+  收细的两端会断成一格一格。
+- **zzz**：64×56 透明底，三个 z 依次冒出（字号 13/16/19，往右上排），第 20 帧
+  一起消失，2 秒一轮。
+
+### zzz 为什么不能画进 sleep.eaf
+
+屏幕上唯一的图形控件是 `eye_anim`，`layout.json` 里 `mirror: auto`。镜像公式
+（`gfx_anim.c:425`）：
+
+```c
+mirror_offset = parent_w - ((obj->geometry.width + obj->geometry.x) * 2);
+// 240 - (125 + (-5))*2 = 0
+dest = x_obj + (width + offset + width - 1 - x) = 244 - x
+```
+
+也就是每个像素都会在**对称位置再画一份**。眼睛镜像正好凑成一对，zzz 镜像就变成
+两个 z、右边那个还是反的。试过把图拉宽到 240 让镜子落到屏幕外，算下来主图与镜像
+正好互补覆盖全屏，等于双重曝光，也不行。
+
+所以 zzz 另起一个 gfx 自定义 anim 对象：
+
+```cpp
+gfx_obj_t* obj = emote_create_obj_by_type(emote_handle_, EMOTE_OBJ_TYPE_ANIM, "sleep_zzz");
+gfx_anim_set_src(obj, data, size);          // data 是 assets 里的 zzz.eaf
+gfx_anim_set_segment(obj, 0, 0xFFFF, 10, true);
+gfx_obj_set_pos(obj, 8, 6);
+```
+
+`SetEmotion("sleepy")` 时 start + 显示，其它表情、聆听、说话时 stop + 隐藏。
+落点 (8,6) 在左上角，是为了躲开右上角的电量角标（57×20 贴顶）。
+`zzz.eaf` 要在 `emote.json` 里注册一行（emotion 名取 `zzz`，不会被用到）——打包脚本
+只拷 `src` 里列到的文件，不注册就进不了 assets 分区。
+
+### 真机验证（串口 `/dev/cu.usbmodem14401`）
+
+```
+I (69793) local_ctrl: wifi power save off (远程客户端活跃)
+I (70793) EmoteDisplay: SetEmotion: neutral
+I (70843) EmoteDisplay: zzz overlay hidden
+I (100153) local_ctrl: wifi power save on (空闲)
+I (100843) EmoteDisplay: SetEmotion: sleepy
+I (100893) EmoteDisplay: zzz overlay shown
+```
+
+首次进睡眠那次还带 `Created custom object 'sleep_zzz' of type 'anim'` 与
+`zzz overlay created (29468 bytes)`。free sram 57975 → 57307（-668B），无告警。
+
+素材换过之后 `build/expression_assets.bin` 不会自己重建（CMake 只依赖打包脚本，
+不依赖素材文件），得先删掉再 build，否则烧进去的还是老图。
