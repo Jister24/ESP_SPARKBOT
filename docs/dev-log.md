@@ -1259,3 +1259,72 @@ App 上一直挂着延迟读数，之前扫一眼是 **1075~2219 ms**，方向�
   按住时给 `snap()` 规格、松手时给 spring，效果一样还不碰挂起调用。
 - 这个 Compose 版本的 `IntSize` 没有 `minDimension`，`size.width.coerceAtMost(size.height)`
   更稳；`DrawScope` 里的 `Size.minDimension` 倒是有的。
+
+## 二十四、低功耗时睡觉（2026-11-01 已烧录验证）
+
+二十二节把 Wi-Fi 省电绑定到「有没有人在用」之后，省电开着基本等价于「这会儿没人管它」。
+可屏幕还挂着一张中立脸，看着像在发呆。这一版就让它在低功耗时闭眼睡觉。
+
+### 判定条件：省电 + 空闲，两个都要
+
+```cpp
+const bool want = LocalControlPowerSaveOn() &&
+                  Application::GetInstance().GetDeviceState() == kDeviceStateIdle;
+```
+
+少一个都会出错：
+
+- 只看省电状态 —— 语音链路不走 HTTP，对着机器人说话时省电一直开着，会出现「边说话边睡」；
+- 只看设备空闲 —— 手机上遥控时设备也 idle，会「边遥控边睡」。
+
+### 为什么是 1 秒轮询，而不是挂到 setPowerSaveLevel
+
+一开始想直接覆写 `Board::SetPowerSaveLevel`：`LOW_POWER` 就睡、`PERFORMANCE` 就醒，事件驱动最干净。
+读 `application.cc` 发现不行——结束对话时它是这么写的：
+
+```cpp
+protocol_->OnAudioChannelClosed([this, &board]() {
+    board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);   // 我们在这里打睡脸
+    Schedule([this]() { ... display->SetEmotion("neutral"); });  // 随后被这行盖掉
+});
+```
+
+同理 `SetDeviceState(kDeviceStateIdle)` 里也有一句 `SetEmotion("neutral")`。所以改成一个 1 秒轮询的任务，
+在状态落定之后按 `want` 覆盖，反而稳：它写完我们补，节奏差 1 秒看不出来。
+
+`sleep_face_on_` 记住「当前是不是已经换成睡脸」，只在翻转的那一拍调 `SetEmotion`——
+每秒重设一次会把循环动画从头拉起，看着像抽帧。
+
+### 两个实现细节
+
+- **省电状态要开放出去**：`local_control.cc` 里加 `LocalControlPowerSaveOn()`，直接返回 `!g_ps_active`。
+  这个 bool 只在省电切换时改写，读它不会撕裂，读到旧值最多让睡脸晚半秒。
+- **任务要延后 2 秒起**：板级是在 `Application` 单例的构造函数里造出来的
+  （`Application::Application()` → `Board::GetInstance()`），构造期间再问
+  `Application::GetInstance().GetDeviceState()` 会踩静态初始化守卫。任务第一件事先
+  `vTaskDelay(2000)`，等单例构造完再开轮。
+
+### 真机验证
+
+USB 串口抓日志，两条路径都走一遍：
+
+```
+I (147653) local_ctrl: wifi power save on (空闲)
+I (147753) EmoteDisplay: SetEmotion: sleepy        ← 静默 30s 后 100ms 换脸
+
+I (224383) local_ctrl: wifi power save off (远程客户端活跃)
+I (224783) EmoteDisplay: SetEmotion: neutral       ← curl /status 后 400ms 醒
+```
+
+没有任何 `emotion "sleepy" not set` 告警，说明 `emote.json` 里 `sleepy → sleep.eaf` 的映射有效
+（`sleep.eaf` 是 loop=true 的循环动画，闭眼呼吸那种）。
+
+### apply.py 同步
+
+补丁里加了 D 段，把成员 `sleep_face_on_`、`UpdateSleepFace()` / `StartSleepFaceTask()` 和构造函数里的
+调用注入到上游板级。同样是「省电 + 空闲」两个条件，逻辑与固件分支一致。
+
+在干净上游 `c435f99` 的 worktree 上重跑：打补丁 → 幂等重跑全部跳过 → 以
+`esp32s3 + BOARD_NAME=esp-sparkbot` 编译通过（`xiaozhi.bin` 0x297d40，分区剩 34%）。
+
+顺带说明：LVGL 界面若没有 `sleepy` 素材，`SetEmotion` 只会返回 false 打条告警，不影响其他功能。

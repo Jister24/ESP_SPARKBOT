@@ -19,6 +19,8 @@
     9. 本地控制服务注入两块电池的 provider，/status 因此多出
        batt / batt_mv / charging 与 chassis_* 三兄弟
    10. 注册 MCP 工具 self.battery.get_status，语音也能问电量
+   11. 低功耗时换睡觉表情：Wi-Fi 省电开着且设备空闲就 SetEmotion("sleepy")，
+       有客户端活动或开始对话换回 neutral（1 秒轮询，见 UpdateSleepFace）
 
 注意: 屏幕右上角的电量角标属于 emote 动画显示方案（main/display/emote_display.cc
 里挂的 gfx 子对象），官方默认的 LVGL 显示没有这套结构，所以本补丁不含角标。
@@ -351,6 +353,61 @@ BOARD_GET_BATTERY_LEVEL = r'''
 
 
 # --------------------------------------------------------------------------
+# D. 低功耗时睡觉
+#
+# 「低功耗」就是 local_control 那套 Wi-Fi 省电：没有远程客户端在用的空闲期里
+# 射频每 100ms 才醒一次。这时候设备确实没事情做，屏幕上一张睡脸比常亮的中立脸
+# 更贴近实际状态；手机一连上、或者开口说话，就换回中立。
+#
+# 两个条件必须同时成立，少一个都会出错：只看省电状态，对着机器人说话时它还在睡
+# （语音链路不走 HTTP，省电一直开着）；只看设备状态，手机上遥控时它会睡着。
+# 用 1 秒轮询而不是挂到 SetPowerSaveLevel 上，是因为 Application 结束对话后是
+# 先切省电档、再 Schedule 一次 SetEmotion("neutral")，挂在档位上会被后者盖掉。
+# --------------------------------------------------------------------------
+
+BOARD_SLEEP_FACE_ANCHOR = "    void InitializeTools() {"
+BOARD_SLEEP_FACE = r'''    // LOCAL_CONTROL_PATCH: 低功耗（Wi-Fi 省电开、没有远程客户端）且设备空闲时，
+    // 屏上换成睡觉表情；有客户端活动或开始对话就换回中立。
+    // 状态每 1 秒对一次，肉眼感知不到，也不会跟 Application 在状态切换时写的
+    // neutral 打架——它先写，我们随后覆盖。
+    void UpdateSleepFace() {
+        if (display_ == nullptr) {
+            return;
+        }
+        const bool want = LocalControlPowerSaveOn() &&
+                          Application::GetInstance().GetDeviceState() == kDeviceStateIdle;
+        if (want == sleep_face_on_) {
+            return;
+        }
+        sleep_face_on_ = want;
+        display_->SetEmotion(want ? "sleepy" : "neutral");
+    }
+
+    void StartSleepFaceTask() {
+        xTaskCreate(
+            [](void* arg) {
+                auto* self = static_cast<EspSparkBot*>(arg);
+                // 板级是在 Application 单例的构造函数里造出来的，这时候还问不了
+                // GetDeviceState，先等单例构造完再开始轮询。
+                vTaskDelay(pdMS_TO_TICKS(2000));
+                while (true) {
+                    self->UpdateSleepFace();
+                    vTaskDelay(pdMS_TO_TICKS(1000));
+                }
+            },
+            "sleep_face", 4096, this, 2, nullptr);
+    }
+
+'''
+
+BOARD_SLEEP_FACE_MEMBER_ANCHOR = "    EspVideo* camera_;"
+BOARD_SLEEP_FACE_MEMBER = "    bool sleep_face_on_ = false;  // LOCAL_CONTROL_PATCH: 低功耗时是否已换成睡脸"
+
+BOARD_SLEEP_FACE_CALL_ANCHOR = "        InitializeTools();"
+BOARD_SLEEP_FACE_CALL = "\n        StartSleepFaceTask();  // LOCAL_CONTROL_PATCH"
+
+
+# --------------------------------------------------------------------------
 # B. 图像方向：板载 GC2145 装反了，默认整帧旋转 180°
 #
 # esp_video / esp_cam_sensor 里 V4L2_CID_HFLIP / VFLIP 都没有实现（grep 全仓无
@@ -635,6 +692,14 @@ class Patcher:
                           "board.cc 调用电池初始化", "InitializeBattery();")
         self.insert_after(board_cc, BOARD_GET_BATTERY_LEVEL_ANCHOR, BOARD_GET_BATTERY_LEVEL,
                           "board.cc GetBatteryLevel 覆写", "GetBatteryLevel(int& level")
+
+        # 低功耗睡脸：成员 → 方法 → 构造函数里起任务
+        self.insert_after(board_cc, BOARD_SLEEP_FACE_MEMBER_ANCHOR, BOARD_SLEEP_FACE_MEMBER,
+                          "board.cc 睡脸成员", "sleep_face_on_")
+        self.insert_before(board_cc, BOARD_SLEEP_FACE_ANCHOR, BOARD_SLEEP_FACE,
+                           "board.cc 低功耗睡脸", "void UpdateSleepFace()")
+        self.insert_after(board_cc, BOARD_SLEEP_FACE_CALL_ANCHOR, BOARD_SLEEP_FACE_CALL,
+                          "board.cc 启动睡脸任务", "StartSleepFaceTask();")
 
         self.add_include(f"{COMMON_DIR}/camera.h", "#include <string>",
                          "#include <vector>  // " + MARK,
