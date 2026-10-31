@@ -6,6 +6,10 @@
 > 官方固件连上 Wi-Fi 后只做一件事：向小智云维持一条 WebSocket。设备侧**不监听任何本地端口**，
 > 所以「同一个局域网里用 IP 访问」这条路官方从来没提供过。本项目把这条路补上。
 
+本仓装着**控制端**和**文档**：Android App、固件改造说明、底盘补丁。
+改了固件的那份源码在独立仓 **[xiaozhi-esp32-sparkbot](https://github.com/Jister24/xiaozhi-esp32-sparkbot)**，
+clone 下来直接能编译；本仓的 `firmware/apply.py` 则是往现成上游 checkout 上打补丁的可选路径。
+
 ## 现在能做什么
 
 | 能力 | 说明 |
@@ -128,9 +132,27 @@ App 侧用一个 `Endpoint` 密封接口把「网络位置」收成类型属性�
 
 ## 快速开始
 
-### 1. 给固件打补丁
+### 1. 拿到固件
 
-需要 ESP-IDF v5.4+ 和一份 [xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) 源码：
+固件本体在独立仓 **[xiaozhi-esp32-sparkbot](https://github.com/Jister24/xiaozhi-esp32-sparkbot)**，
+直接 clone 就能编译，**不需要打补丁**：
+
+```bash
+git clone git@github.com:Jister24/xiaozhi-esp32-sparkbot.git
+cd xiaozhi-esp32-sparkbot
+. $IDF_PATH/export.sh                      # 需要 ESP-IDF v6.0.1+
+idf.py -DIDF_TARGET=esp32s3 -DBOARD_NAME=esp-sparkbot build
+idf.py -p /dev/cu.usbmodem* flash monitor
+```
+
+> 目标必须显式给 `esp32s3`。缺了它 `idf.py` 一样报「编译成功」，但板级 `.obj` 一个都没编，
+> 烧进去还是老固件——这个坑踩过不止一次。
+
+#### 可选：把改动叠在自己那份上游上
+
+`firmware/apply.py` 是另一条路，往现成的 xiaozhi-esp32 checkout 上外挂同样的改动，
+适合已经跟着上游主线走、不想维护分叉的情况。它只做插入、不删改原有逻辑，幂等且可精确回滚；
+代价是依赖源码锚点，上游改动锚点附近代码时会失败。
 
 ```bash
 git clone https://github.com/78/xiaozhi-esp32.git
@@ -138,23 +160,20 @@ cd xiaozhi-esp32
 python3 /path/to/ESP_SPARKBOT/firmware/apply.py .          # 打补丁
 python3 /path/to/ESP_SPARKBOT/firmware/apply.py . --check  # 只看会改什么
 python3 /path/to/ESP_SPARKBOT/firmware/apply.py . --revert # 回滚
+idf.py -DIDF_TARGET=esp32s3 -DBOARD_NAME=esp-sparkbot build
 ```
 
-补丁只做插入、不删改原有逻辑，幂等且可精确回滚。之后正常编译烧录：
-
-```bash
-idf.py set-target esp32s3
-idf.py menuconfig      # Xiaozhi Assistant → Board Type → esp-sparkbot
-idf.py build flash monitor
-```
-
-除了遥控与图传，补丁还会注入主体板的电池采样（GPIO14 分压）、底盘电量读取
-（经板间 UART 问 C2，需要底盘刷过 [`firmware/chassis/`](firmware/chassis/) 的补丁）
-以及 `self.battery.get_status` 语音工具，`/status` 因此多出 `batt` / `batt_mv` /
+两条路重叠的部分：遥控与图传、GC2145 支持、图像 180° 纠正、主体板电池采样（GPIO14 分压）、
+底盘电量读取（经板间 UART 问 C2，需要底盘刷过 [`firmware/chassis/`](firmware/chassis/) 的补丁）、
+`self.battery.get_status` 语音工具、低功耗时切睡脸。`/status` 因此多出 `batt` / `batt_mv` /
 `charging` 与 `chassis_*` 三兄弟，App 的电源卡才有数可显示。
 
-> 屏幕右上角的电量角标不在补丁内：它是表情（emote）显示方案里挂在 gfx 上的子对象，
-> 官方默认的 LVGL 界面没有这套渲染结构。电量在 App 与 `/status` 里都拿得到。
+**补丁版少两样**，因为都挂在 emote 显示的 gfx 树上，官方默认的 LVGL 界面没有这套结构：
+
+- 屏幕右上角的电量角标（含百分比）。电量在 App 与 `/status` 里照样拿得到。
+- 重画的闭眼睡脸和 zzz 叠加层。补丁版能切到 `sleepy`，但用的是上游自带素材，
+  那时还是睁眼的变形动画。素材在 [`firmware/tools/`](firmware/tools/)，可用
+  `emote_sleep.py --install` 装进任意一份 checkout。
 
 ### 2. 选一个控制端
 
@@ -200,12 +219,13 @@ python3 client/sparkbot.py watch               # 终端里看图传
 
 ```
 .
-├── firmware/              固件补丁
-│   ├── apply.py           把遥控、图传与电量注入 xiaozhi-esp32（幂等、可回滚）
+├── firmware/              固件改造（完整源码见 xiaozhi-esp32-sparkbot 仓）
+│   ├── apply.py           可选：把遥控、图传与电量注入现成的 xiaozhi-esp32（幂等、可回滚）
 │   ├── local_control.h/.cc   8080 控制 + 8081 图传，复用现有 UART 与摄像头
 │   ├── chassis_battery.h/.cc 经板间 UART 向底盘 C2 问电量
+│   ├── chassis/           底盘（ESP32-C2）补丁与飞线说明
 │   ├── emote_style/       240×240 表情素材与布局
-│   └── tools/eaf_render.py  把 .eaf 表情解码成 PNG / GIF
+│   └── tools/             .eaf 解码渲染 / 编码器 / 睡脸与 zzz 素材生成
 ├── android/               原生 App（Compose，四个页面 + Endpoint 抽象）
 ├── client/sparkbot.py     零依赖命令行客户端
 ├── remote/                远程访问配置模板（frps / frpc / Nginx / 极空间部署）
@@ -241,7 +261,8 @@ python3 client/sparkbot.py watch               # 终端里看图传
 
 ## 致谢
 
-- [78/xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) —— 小智 AI 固件本体，本项目以补丁形式叠加
+- [78/xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) —— 小智 AI 固件本体。
+  改造后的完整源码在 [xiaozhi-esp32-sparkbot](https://github.com/Jister24/xiaozhi-esp32-sparkbot)（基线 `c435f99`）
 - 乐鑫 ESP-SparkBot 板级与 emote 动画方案
 - [fatedier/frp](https://github.com/fatedier/frp) —— 远程访问的穿透层
 
