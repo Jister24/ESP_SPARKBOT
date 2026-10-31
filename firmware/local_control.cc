@@ -4,6 +4,7 @@
 #include <esp_log.h>
 #include <esp_netif.h>
 #include <esp_timer.h>
+#include <esp_wifi.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
@@ -32,6 +33,7 @@ constexpr size_t kMaxJpegBytes = 200 * 1024;
 
 std::function<void(const char*)> g_send;
 BatteryProvider g_battery;
+BatteryProvider g_chassis_battery;
 httpd_handle_t g_ctrl_server = nullptr;
 httpd_handle_t g_cam_server = nullptr;
 SemaphoreHandle_t g_cam_lock = nullptr;
@@ -121,6 +123,48 @@ esp_err_t ReplyText(httpd_req_t* req, const char* text) {
 }
 
 // ---------------------------------------------------------------------------
+// Wi-Fi 省电模式：有客户端在用就退出，静默一段时间再回去
+// ---------------------------------------------------------------------------
+// IDF 默认是 WIFI_PS_MIN_MODEM：射频每 100ms 才醒一次收包。对语音对话无所谓，
+// 但遥控是实时操作，实测往返延迟从 Mac 上的 60ms 劣化到手机上 500~2200ms，
+// 而且抖动极大。这里不给全局关省电（待机电流会明显上去），改成按有没有人在用：
+// 收到任何一次 HTTP 请求就刷新计时，活跃期内用 WIFI_PS_NONE，静默超过
+// kPsIdleSec 秒退回 MIN_MODEM。
+constexpr int64_t kPsIdleUs = 30LL * 1000 * 1000;
+
+volatile int64_t g_last_request_us = 0;
+bool g_ps_active = false;  // 当前是否真的处在「已退出省电」状态
+
+// Wi-Fi 没起来时 esp_wifi_set_ps 会报 ESP_ERR_WIFI_NOT_STARTED，这是正常的：
+// 本任务在联网前就已经在跑了，下一轮重试即可，不要刷警告。
+void ApplyPowerMode(bool active) {
+    if (active == g_ps_active) {
+        return;
+    }
+    esp_err_t err = esp_wifi_set_ps(active ? WIFI_PS_NONE : WIFI_PS_MIN_MODEM);
+    if (err == ESP_OK) {
+        g_ps_active = active;
+        ESP_LOGI(TAG, "wifi power save %s", active ? "off (远程客户端活跃)" : "on (空闲)");
+    }
+}
+
+// 每个 HTTP 请求进来都调一次。发现已经掉回省电就当场切回来，
+// 不等后台任务那 500ms 的轮询——第一帧遥控指令不该再吃一次 1 秒延迟。
+void NoteClientActivity() {
+    g_last_request_us = esp_timer_get_time();
+    ApplyPowerMode(true);
+}
+
+void PowerModeTask(void*) {
+    while (true) {
+        const int64_t last = g_last_request_us;
+        const bool active = last != 0 && (esp_timer_get_time() - last) < kPsIdleUs;
+        ApplyPowerMode(active);
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 画面方向
 // ---------------------------------------------------------------------------
 
@@ -169,6 +213,7 @@ bool CaptureJpeg(std::vector<uint8_t>& out) {
 // ---------------------------------------------------------------------------
 
 esp_err_t HandleMove(httpd_req_t* req) {
+    NoteClientActivity();
     float x = 0.0f;
     float y = 0.0f;
     bool has_x = QueryFloat(req, "x", &x);
@@ -185,11 +230,13 @@ esp_err_t HandleMove(httpd_req_t* req) {
 }
 
 esp_err_t HandleStop(httpd_req_t* req) {
+    NoteClientActivity();
     SendMotion(0.0f, 0.0f);
     return ReplyText(req, "stopped");
 }
 
 esp_err_t HandleCmd(httpd_req_t* req) {
+    NoteClientActivity();
     char cmd[32];
     if (!QueryValue(req, "c", cmd, sizeof(cmd))) {
         AddCommonHeaders(req);
@@ -201,6 +248,7 @@ esp_err_t HandleCmd(httpd_req_t* req) {
 }
 
 esp_err_t HandleRot(httpd_req_t* req) {
+    NoteClientActivity();
     char raw[8];
     bool on = !g_rot180;  // 不带参数就切换
     if (QueryValue(req, "on", raw, sizeof(raw))) {
@@ -211,15 +259,27 @@ esp_err_t HandleRot(httpd_req_t* req) {
 }
 
 esp_err_t HandleStatus(httpd_req_t* req) {
-    char body[384];
+    NoteClientActivity();
+    char body[480];
     char flush[64] = "";
     char battery[64] = "";
+    char chassis[80] = "";
     if (g_battery) {
         int cell_mv = 0;
         int percent = 0;
         bool charging = false;
         if (g_battery(cell_mv, percent, charging)) {
             snprintf(battery, sizeof(battery), ",\"batt\":%d,\"batt_mv\":%d,\"charging\":%s",
+                     percent, cell_mv, charging ? "true" : "false");
+        }
+    }
+    if (g_chassis_battery) {
+        int cell_mv = 0;
+        int percent = 0;
+        bool charging = false;
+        if (g_chassis_battery(cell_mv, percent, charging)) {
+            snprintf(chassis, sizeof(chassis),
+                     ",\"chassis_batt\":%d,\"chassis_batt_mv\":%d,\"chassis_charging\":%s",
                      percent, cell_mv, charging ? "true" : "false");
         }
     }
@@ -232,11 +292,12 @@ esp_err_t HandleStatus(httpd_req_t* req) {
 #endif
     snprintf(body, sizeof(body),
              "{\"ok\":true,\"ip\":\"%s\",\"x\":%.2f,\"y\":%.2f,\"uptime_s\":%lld,"
-             "\"camera\":%s,\"rot\":%s%s%s}",
+             "\"camera\":%s,\"rot\":%s,\"ps\":\"%s\"%s%s%s}",
              g_ip, g_speed_x, g_speed_y,
              (long long)((esp_timer_get_time() - g_boot_us) / 1000000),
              Board::GetInstance().GetCamera() != nullptr ? "true" : "false",
-             g_rot180 ? "true" : "false", flush, battery);
+             g_rot180 ? "true" : "false", g_ps_active ? "none" : "min_modem",
+             flush, battery, chassis);
     return ReplyJson(req, body);
 }
 
@@ -354,7 +415,8 @@ async function poll(){
     const j=await r.json();
     stat.textContent=j.ip+' · 速度 '+Math.round(speed*100)+'% · 在线 '+
       (j.uptime_s/60).toFixed(0)+' 分钟'+
-      (typeof j.batt==='number' ? ' · 电量 '+j.batt+'%'+(j.charging?'（充电中）':'') : '');
+      (typeof j.batt==='number' ? ' · 本体 '+j.batt+'%'+(j.charging?'⚡':'') : '')+
+      (typeof j.chassis_batt==='number' ? ' · 底盘 '+j.chassis_batt+'%'+(j.chassis_charging?'⚡':'') : '');
     if(typeof j.rot==='boolean'&&j.rot!==rot){rot=j.rot; paintRot();}
   }catch(e){stat.textContent='设备离线';}
   setTimeout(poll,2000);
@@ -363,6 +425,7 @@ poll();
 </script></body></html>)HTML";
 
 esp_err_t HandleIndex(httpd_req_t* req) {
+    NoteClientActivity();
     AddCommonHeaders(req);
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     return httpd_resp_send(req, kIndexHtml, HTTPD_RESP_USE_STRLEN);
@@ -373,6 +436,7 @@ esp_err_t HandleIndex(httpd_req_t* req) {
 // ---------------------------------------------------------------------------
 
 esp_err_t HandleSnapshot(httpd_req_t* req) {
+    NoteClientActivity();
     std::vector<uint8_t> jpeg;
     if (!CaptureJpeg(jpeg)) {
         AddCommonHeaders(req);
@@ -386,11 +450,13 @@ esp_err_t HandleSnapshot(httpd_req_t* req) {
 
 esp_err_t HandleStream(httpd_req_t* req) {
     static const char* kBoundary = "sparkbotframe";
+    NoteClientActivity();
     AddCommonHeaders(req);
     httpd_resp_set_type(req, "multipart/x-mixed-replace;boundary=sparkbotframe");
     httpd_resp_set_hdr(req, "X-Accel-Buffering", "no");
 
     for (;;) {
+        NoteClientActivity();  // 长连接期间持续续期，别看着看着掉回省电
         std::vector<uint8_t> jpeg;
         if (!CaptureJpeg(jpeg)) {
             vTaskDelay(pdMS_TO_TICKS(300));
@@ -507,6 +573,8 @@ void BootstrapTask(void*) {
 
     StartControlServer();
     StartCameraServer();
+    // 服务能收请求了才开始看有没有人用；Wi-Fi 早已连上，set_ps 不会报未初始化
+    xTaskCreate(PowerModeTask, "wifi_ps_ctl", 3072, nullptr, 2, nullptr);
     ESP_LOGI(TAG, "local control ready: http://%s:%d/", g_ip, kCtrlPort);
 
     vTaskDelete(nullptr);
@@ -515,13 +583,15 @@ void BootstrapTask(void*) {
 }  // namespace
 
 void LocalControlStart(std::function<void(const char*)> send_command,
-                       BatteryProvider battery_provider) {
+                       BatteryProvider battery_provider,
+                       BatteryProvider chassis_battery_provider) {
     if (g_send) {
         ESP_LOGW(TAG, "already started");
         return;
     }
     g_send = std::move(send_command);
     g_battery = std::move(battery_provider);
+    g_chassis_battery = std::move(chassis_battery_provider);
     g_boot_us = esp_timer_get_time();
     g_cam_lock = xSemaphoreCreateMutex();
     if (g_cam_lock == nullptr) {

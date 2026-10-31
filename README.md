@@ -40,13 +40,17 @@ ESP32-S3 机器人 ────┤
 
 | 端口 | 路径 | 说明 |
 |---|---|---|
-| 8080 | `/status` `/move?x=&y=` `/stop` `/cmd?c=` `/rot` | 控制，响应 <10ms |
+| 8080 | `/status` `/move?x=&y=` `/stop` `/cmd?c=` `/rot` | 控制，局域网往返 20~40ms（详见下方 `ps` 字段） |
 | 8081 | `/stream` `/snapshot` | MJPEG 连续流 / 单帧 JPEG |
 
-`/status` 返回 `ip / x / y / uptime_s / camera / rot / batt / batt_mv / charging`，
+`/status` 返回 `ip / x / y / uptime_s / camera / rot / ps / batt / batt_mv / charging`，
 底盘上报时还会多出 `chassis_batt / chassis_batt_mv / chassis_charging`。
 电量字段在不可用时整段省略，不会给假值：老固件没有主体板电池检测就少 `batt` 三兄弟，
 底盘没刷过上报固件就少 `chassis_*` 三兄弟。
+
+`ps` 是当前的 Wi-Fi 省电档位。固件默认让 IDF 走 `MIN_MODEM`，一旦有客户端发请求就
+切到 `WIFI_PS_NONE`，静默 30 秒后自动回退——遥控是实时操作，省电带来的 100ms 唤醒周期
+会让指令延迟到几百毫秒甚至两秒，得不偿失；没人用的时候则没必要一直醒着。
 
 **为什么拆两个端口**：ESP-IDF 的 `httpd` 是单任务串行处理，抓一帧 + JPEG 编码约 300~500ms。
 如果和控制指令共用实例，推流期间按方向键会有半秒延迟。拆开后控制端永不被图像阻塞。
