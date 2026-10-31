@@ -138,7 +138,7 @@ App 侧用一个 `Endpoint` 密封接口把「网络位置」收成类型属性�
 直接 clone 就能编译，**不需要打补丁**：
 
 ```bash
-git clone git@github.com:Jister24/xiaozhi-esp32-sparkbot.git
+git clone https://github.com/Jister24/xiaozhi-esp32-sparkbot.git
 cd xiaozhi-esp32-sparkbot
 . $IDF_PATH/export.sh                      # 需要 ESP-IDF v6.0.1+
 python scripts/build.py espressif/esp-sparkbot
