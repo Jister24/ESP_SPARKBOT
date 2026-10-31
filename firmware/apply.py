@@ -13,6 +13,16 @@
     4. EspSparkBot 构造函数启动本地控制服务
     5. Camera 基类增加 SetRotate180 虚方法（默认 no-op），EspVideo 用软件
        整帧 180° 旋转实现（板载 GC2145 是倒装的，见 B 段补丁）
+    6. 新增 chassis_battery.h / chassis_battery.cc：经板间 UART 向底盘 C2 问电量
+    7. config.h 增加电池分压宏（GPIO14 / ADC2_CH3，两个 100k 等值电阻 1:1）
+    8. EspSparkBot 增加电池采样类、10 秒采样任务，并覆写 Board::GetBatteryLevel
+    9. 本地控制服务注入两块电池的 provider，/status 因此多出
+       batt / batt_mv / charging 与 chassis_* 三兄弟
+   10. 注册 MCP 工具 self.battery.get_status，语音也能问电量
+
+注意: 屏幕右上角的电量角标属于 emote 动画显示方案（main/display/emote_display.cc
+里挂的 gfx 子对象），官方默认的 LVGL 显示没有这套结构，所以本补丁不含角标。
+电量在 App 与 /status 里都拿得到。
 
 设计原则: 只做插入，不删改原有逻辑；所有改动幂等，可精确回滚。
 """
@@ -87,7 +97,258 @@ bool EspVideo::GetJpegFrame(std::vector<uint8_t>& out) {{
 """
 
 BOARD_CC_INCLUDE_ANCHOR = '#include "config.h"'
-BOARD_CC_INCLUDE_ADDITION = f'#include "local_control.h"  // {MARK}'
+BOARD_CC_INCLUDE_ADDITION = '''#include "chassis_battery.h"  // LOCAL_CONTROL_PATCH: 底盘电量走 UART
+#include "local_control.h"  // LOCAL_CONTROL_PATCH
+#include <esp_adc/adc_cali.h>  // LOCAL_CONTROL_PATCH: 电池分压采样
+#include <esp_adc/adc_cali_scheme.h>
+#include <esp_adc/adc_oneshot.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>'''
+
+# --------------------------------------------------------------------------
+# C. 电量：主体板电池 + 底盘电池
+#
+# 官方固件完全不读电池。主体板的引脚是实测扫出来的：ADC1/ADC2 所有空闲通道
+# 逐个采，只有 GPIO14（ADC2_CH3）读数稳定且量级像电池分压——满电插 USB 时
+# 引脚 2084 mV，抖动 <10 mV。等值电阻 1:1 分压，电芯电压 = 引脚 × 2。
+# 底盘那颗电池在 C2 一侧，只能通过板间 UART 问，见 chassis_battery.cc。
+# --------------------------------------------------------------------------
+
+CONFIG_H_INCLUDE_ANCHOR = "#include <driver/uart.h>"
+CONFIG_H_INCLUDE_ADDITION = "#include <esp_adc/adc_oneshot.h>  // LOCAL_CONTROL_PATCH"
+
+CONFIG_H_BATTERY_ANCHOR = "#define BUF_SIZE                (1024)"
+CONFIG_H_BATTERY_ADDITION = '''
+
+/* LOCAL_CONTROL_PATCH: 主体板电池检测
+ * 官方固件不读电池，原理图也没公开，靠实测确定：GPIO14（ADC2_CH3）是唯一
+ * 电压稳定、且随电池变化的引脚（满电实测 2084 mV，抖动 <10 mV）。
+ * 按两个 100k 等值电阻分压还原，电芯 = 引脚电压 × 2。
+ * 注意 ADC2 在 ESP32 上会与 Wi-Fi 冲突，S3 上实测不会，所以不必在 Wi-Fi 前采样。 */
+#define BATTERY_ADC_UNIT          ADC_UNIT_2
+#define BATTERY_ADC_CHANNEL       ADC_CHANNEL_3
+#define BATTERY_UPPER_RESISTOR    (100000.0f)
+#define BATTERY_LOWER_RESISTOR    (100000.0f)'''
+
+BOARD_BATTERY_CLASS_ANCHOR = '#define TAG "esp_sparkbot"'
+BOARD_BATTERY_CLASS = r'''// ===========================================================================
+// LOCAL_CONTROL_PATCH: 电池检测（主体板）
+//
+// 电量百分比按开路电压曲线插值，充电状态没有硬件指示脚，只能用电压趋势推断。
+// ===========================================================================
+class SparkBotBattery {
+public:
+    bool Begin() {
+        adc_oneshot_unit_init_cfg_t unit_cfg = {};
+        unit_cfg.unit_id = BATTERY_ADC_UNIT;
+        unit_cfg.ulp_mode = ADC_ULP_MODE_DISABLE;
+        esp_err_t err = adc_oneshot_new_unit(&unit_cfg, &unit_);
+        if (err != ESP_OK) {
+            ESP_LOGE(kTag, "ADC 单元创建失败: %s", esp_err_to_name(err));
+            return false;
+        }
+
+        adc_oneshot_chan_cfg_t chan_cfg = {};
+        chan_cfg.atten = ADC_ATTEN_DB_12;
+        chan_cfg.bitwidth = ADC_BITWIDTH_DEFAULT;
+        err = adc_oneshot_config_channel(unit_, BATTERY_ADC_CHANNEL, &chan_cfg);
+        if (err != ESP_OK) {
+            ESP_LOGE(kTag, "ADC 通道配置失败: %s", esp_err_to_name(err));
+            return false;
+        }
+
+        // 曲线拟合校准：没有校准表也能出数，只是绝对精度差几十 mV，
+        // 对电量百分比影响不大，所以失败不致命。
+        adc_cali_curve_fitting_config_t cali_cfg = {};
+        cali_cfg.unit_id = BATTERY_ADC_UNIT;
+        cali_cfg.atten = ADC_ATTEN_DB_12;
+        cali_cfg.bitwidth = ADC_BITWIDTH_DEFAULT;
+        if (adc_cali_create_scheme_curve_fitting(&cali_cfg, &cali_) != ESP_OK) {
+            cali_ = nullptr;
+        }
+
+        ready_ = true;
+        ESP_LOGI(kTag, "电池检测就绪，cali=%d", cali_ != nullptr);
+        return true;
+    }
+
+    bool IsReady() const { return ready_; }
+
+    // 采样一次并更新平滑值。16 次取平均可以把 ±5 LSB 的抖动压到 1 LSB 量级。
+    void Update() {
+        if (!ready_) {
+            return;
+        }
+        int sum = 0;
+        int ok = 0;
+        for (int i = 0; i < kSamples; i++) {
+            int raw = 0;
+            if (adc_oneshot_read(unit_, BATTERY_ADC_CHANNEL, &raw) != ESP_OK) {
+                continue;
+            }
+            sum += raw;
+            ok++;
+        }
+        if (ok == 0) {
+            return;
+        }
+        int pin_mv = sum / ok;
+        if (cali_ != nullptr) {
+            int mv = 0;
+            if (adc_cali_raw_to_voltage(cali_, sum / ok, &mv) == ESP_OK) {
+                pin_mv = mv;
+            }
+        }
+        const float cell = pin_mv * (BATTERY_UPPER_RESISTOR + BATTERY_LOWER_RESISTOR) /
+                           BATTERY_LOWER_RESISTOR;
+        // 一阶低通：充电/放电都慢，没必要让显示跟着负载跳。
+        cell_mv_ = (cell_mv_ <= 0) ? static_cast<int>(cell)
+                                   : static_cast<int>(cell_mv_ * 0.7f + cell * 0.3f);
+
+        history_[history_index_] = cell_mv_;
+        history_index_ = (history_index_ + 1) % kHistory;
+        if (history_count_ < kHistory) {
+            history_count_++;
+        }
+    }
+
+    int CellMillivolts() const { return cell_mv_; }
+
+    int Percent() const {
+        if (cell_mv_ <= 0) {
+            return 0;
+        }
+        // 锂电开路电压 → 剩余电量，取自 adc_battery_estimation 的默认曲线
+        static const struct {
+            int mv;
+            int pct;
+        } kOcv[] = {
+            {4160, 100}, {4070, 90}, {3990, 80}, {3900, 70}, {3820, 60}, {3720, 50},
+            {3610, 40},  {3530, 30}, {3380, 20}, {3200, 10}, {2850, 0},
+        };
+        constexpr int kCount = sizeof(kOcv) / sizeof(kOcv[0]);
+        if (cell_mv_ >= kOcv[0].mv) {
+            return 100;
+        }
+        for (int i = 0; i < kCount - 1; i++) {
+            if (cell_mv_ <= kOcv[i].mv && cell_mv_ >= kOcv[i + 1].mv) {
+                const int dv = kOcv[i].mv - kOcv[i + 1].mv;
+                const int dp = kOcv[i].pct - kOcv[i + 1].pct;
+                return kOcv[i + 1].pct + (cell_mv_ - kOcv[i + 1].mv) * dp / dv;
+            }
+        }
+        return 0;
+    }
+
+    // 纯启发式：插着 USB 时电压会被充电电路顶高，3 分钟内上涨超过 12 mV，
+    // 或已经贴在满电电压上，就认为在充电。拔掉后电压回落即判定为放电。
+    bool IsCharging() const {
+        if (cell_mv_ <= 0) {
+            return false;
+        }
+        if (cell_mv_ >= kFullMv - 10) {
+            return true;
+        }
+        if (history_count_ < kHistory) {
+            return false;
+        }
+        // history_index_ 指向下一个要写入的槽位，也就是 3 分钟前那一个样本
+        const int oldest = history_[history_index_];
+        return cell_mv_ - oldest >= 12;
+    }
+
+private:
+    static constexpr const char* kTag = "sparkbot_batt";
+    static constexpr int kSamples = 16;
+    static constexpr int kHistory = 36;  // 5s × 36 = 3 分钟
+    static constexpr int kFullMv = 4160;
+
+    adc_oneshot_unit_handle_t unit_ = nullptr;
+    adc_cali_handle_t cali_ = nullptr;
+    bool ready_ = false;
+    int cell_mv_ = -1;
+    int history_[kHistory] = {};
+    int history_index_ = 0;
+    int history_count_ = 0;
+};
+// ===== BATTERY END =====
+
+'''
+
+BOARD_BATTERY_MEMBER_ANCHOR = "    EspVideo* camera_;"
+BOARD_BATTERY_MEMBER = '''    SparkBotBattery battery_;             // LOCAL_CONTROL_PATCH
+    ChassisBattery chassis_battery_;      // LOCAL_CONTROL_PATCH: 走 UART 问底盘那颗 C2'''
+
+BOARD_BATTERY_INIT_ANCHOR = "    void InitializeTools() {"
+BOARD_BATTERY_INIT = r'''    // LOCAL_CONTROL_PATCH: 采样不必很勤，电量本身变化慢，10 秒一次足够
+    void InitializeBattery() {
+        // 底盘电量走 UART，与本体电池互不影响，先起起来（读不到就静默降级）
+        chassis_battery_.Begin();
+        if (!battery_.Begin()) {
+            return;
+        }
+        // 先同步采一次，保证第一个 /status 就有数
+        battery_.Update();
+        xTaskCreate(
+            [](void* arg) {
+                auto* self = static_cast<EspSparkBot*>(arg);
+                while (true) {
+                    vTaskDelay(pdMS_TO_TICKS(10000));
+                    self->battery_.Update();
+                }
+            },
+            "battery", 3072, this, 2, nullptr);
+    }
+
+'''
+
+BOARD_BATTERY_TOOL_ANCHOR = "        auto& mcp_server = McpServer::GetInstance();"
+BOARD_BATTERY_TOOL = r'''
+        // LOCAL_CONTROL_PATCH: 语音也能问电量。两块电池分别判断可用性，
+        // 读不到就直说读不到，不返回假值。
+        mcp_server.AddTool("self.battery.get_status", "获取电池电量和电压（本体与底盘各一块）",
+                           PropertyList(),
+                           [this](const PropertyList& properties) -> ReturnValue {
+                               std::string body;
+                               if (battery_.IsReady()) {
+                                   battery_.Update();
+                                   body = "本体电量 " + std::to_string(battery_.Percent()) +
+                                          "%，电压 " + std::to_string(battery_.CellMillivolts()) +
+                                          " mV";
+                               } else {
+                                   body = "本体电池检测不可用";
+                               }
+                               if (chassis_battery_.IsValid()) {
+                                   body += "；底盘电量 " +
+                                           std::to_string(chassis_battery_.Percent()) + "%，电压 " +
+                                           std::to_string(chassis_battery_.Millivolts()) + " mV" +
+                                           (chassis_battery_.IsCharging() ? "（充电中）" : "");
+                               } else {
+                                   body += "；底盘电量读不到";
+                               }
+                               return body;
+                           });
+'''
+
+BOARD_BATTERY_CALL_ANCHOR = "        InitializeEchoUart();"
+BOARD_BATTERY_CALL = "\n        InitializeBattery();  // LOCAL_CONTROL_PATCH"
+
+BOARD_GET_BATTERY_LEVEL_ANCHOR = "    virtual Camera* GetCamera() override { return camera_; }"
+BOARD_GET_BATTERY_LEVEL = r'''
+
+    // LOCAL_CONTROL_PATCH: 把板级电池读数接进小智自己的电量体系，
+    // 电量查询、低电提醒都走这里。
+    virtual bool GetBatteryLevel(int& level, bool& charging, bool& discharging) override {
+        if (!battery_.IsReady()) {
+            return false;
+        }
+        const bool is_charging = battery_.IsCharging();
+        charging = is_charging;
+        discharging = !is_charging;
+        level = battery_.Percent();
+        return true;
+    }'''
+
 
 # --------------------------------------------------------------------------
 # B. 图像方向：板载 GC2145 装反了，默认整帧旋转 180°
@@ -216,9 +477,29 @@ ROTATE_VIDEO_CC_CALL = f"""    // {MARK}: 传感器倒装，预览/编码前先�
 """
 
 BOARD_CC_INIT_ANCHOR = "        InitializeTools();"
-BOARD_CC_INIT_ADDITION = f"""        // {MARK}: 在板级完成 UART 与摄像头初始化后，起局域网遥控服务。
+BOARD_CC_INIT_ADDITION = r'''        // LOCAL_CONTROL_PATCH: 在板级完成 UART 与摄像头初始化后，起局域网遥控服务。
         // lambda 捕获 this 以复用 private 的 SendUartMessage，无需开放可见性。
-        LocalControlStart([this](const char* cmd) {{ SendUartMessage(cmd); }});"""
+        // 后两个 provider 让 /status 带上两块电池的读数，读不到就返回 false，
+        // 由 local_control 自己省略字段——不给 App 假值。
+        LocalControlStart([this](const char* cmd) { SendUartMessage(cmd); },
+                          [this](int& cell_mv, int& percent, bool& charging) {
+                              if (!battery_.IsReady() || battery_.CellMillivolts() <= 0) {
+                                  return false;
+                              }
+                              cell_mv = battery_.CellMillivolts();
+                              percent = battery_.Percent();
+                              charging = battery_.IsCharging();
+                              return true;
+                          },
+                          [this](int& cell_mv, int& percent, bool& charging) {
+                              if (!chassis_battery_.IsValid()) {
+                                  return false;
+                              }
+                              cell_mv = chassis_battery_.Millivolts();
+                              percent = chassis_battery_.Percent();
+                              charging = chassis_battery_.IsCharging();
+                              return true;
+                          });'''
 
 
 class Patcher:
@@ -227,8 +508,13 @@ class Patcher:
         self.check_only = check_only
         self.changes = []
         self.errors = []
+        # 同一文件常常要连改好几处（如 esp_video.h 先加声明再加覆写），
+        # --check 不落盘时后续锚点就读不到前一步的插入，所以统一走内存缓存。
+        self._cache = {}
 
     def read(self, rel: str) -> str:
+        if rel in self._cache:
+            return self._cache[rel]
         path = self.root / rel
         if not path.exists():
             self.errors.append(f"文件不存在: {rel}")
@@ -236,6 +522,7 @@ class Patcher:
         return path.read_text(encoding="utf-8")
 
     def write(self, rel: str, content: str):
+        self._cache[rel] = content
         if self.check_only:
             return
         (self.root / rel).write_text(content, encoding="utf-8")
@@ -271,11 +558,13 @@ class Patcher:
         self.write(rel, new_text)
         self.changes.append(f"已修改: {label}")
 
-    def add_include(self, rel: str, anchor: str, addition: str, label: str):
+    def add_include(self, rel: str, anchor: str, addition: str, label: str,
+                    marker=None):
         text = self.read(rel)
         if not text:
             return
-        if addition in text:
+        # 多行 include 块用 marker 判断是否已插入，避免旧版单行补丁又被插一次
+        if (marker or addition) in text:
             self.changes.append(f"跳过（已打过）: {label}")
             return
         if anchor not in text:
@@ -307,7 +596,8 @@ class Patcher:
         self.changes.append("已修改: config.json 启用 GC2145 驱动")
 
     def copy_module(self):
-        for name in ("local_control.h", "local_control.cc"):
+        for name in ("local_control.h", "local_control.cc",
+                     "chassis_battery.h", "chassis_battery.cc"):
             src = Path(__file__).parent / name
             dst = self.root / BOARD_DIR / name
             if not src.exists():
@@ -322,10 +612,29 @@ class Patcher:
 
     def run(self):
         board_cc = f"{BOARD_DIR}/esp_sparkbot_board.cc"
+        config_h = f"{BOARD_DIR}/config.h"
         self.add_include(board_cc, BOARD_CC_INCLUDE_ANCHOR, BOARD_CC_INCLUDE_ADDITION,
-                         "board.cc include local_control.h")
+                         "board.cc include local_control.h", marker="chassis_battery.h")
         self.insert_after(board_cc, BOARD_CC_INIT_ANCHOR, BOARD_CC_INIT_ADDITION,
                           "board.cc 启动本地服务", "LocalControlStart(")
+
+        # 电量：config.h 的引脚宏 → board.cc 的采样类/成员/初始化/MCP 工具
+        self.add_include(config_h, CONFIG_H_INCLUDE_ANCHOR, CONFIG_H_INCLUDE_ADDITION,
+                         "config.h include adc_oneshot", marker="adc_oneshot.h")
+        self.insert_after(config_h, CONFIG_H_BATTERY_ANCHOR, CONFIG_H_BATTERY_ADDITION,
+                          "config.h 电池分压宏", "BATTERY_ADC_UNIT")
+        self.insert_before(board_cc, BOARD_BATTERY_CLASS_ANCHOR, BOARD_BATTERY_CLASS,
+                           "board.cc 电池采样类", "class SparkBotBattery")
+        self.insert_after(board_cc, BOARD_BATTERY_MEMBER_ANCHOR, BOARD_BATTERY_MEMBER,
+                          "board.cc 电池成员", "SparkBotBattery battery_;")
+        self.insert_before(board_cc, BOARD_BATTERY_INIT_ANCHOR, BOARD_BATTERY_INIT,
+                           "board.cc 电池初始化", "void InitializeBattery()")
+        self.insert_after(board_cc, BOARD_BATTERY_TOOL_ANCHOR, BOARD_BATTERY_TOOL,
+                          "board.cc MCP 电量工具", "self.battery.get_status")
+        self.insert_after(board_cc, BOARD_BATTERY_CALL_ANCHOR, BOARD_BATTERY_CALL,
+                          "board.cc 调用电池初始化", "InitializeBattery();")
+        self.insert_after(board_cc, BOARD_GET_BATTERY_LEVEL_ANCHOR, BOARD_GET_BATTERY_LEVEL,
+                          "board.cc GetBatteryLevel 覆写", "GetBatteryLevel(int& level")
 
         self.add_include(f"{COMMON_DIR}/camera.h", "#include <string>",
                          "#include <vector>  // " + MARK,
@@ -362,6 +671,7 @@ def revert(root: Path):
     """从 .bak 恢复被改过的文件，并删除新增模块。"""
     targets = [
         f"{BOARD_DIR}/esp_sparkbot_board.cc",
+        f"{BOARD_DIR}/config.h",
         f"{COMMON_DIR}/camera.h",
         f"{COMMON_DIR}/esp_video.h",
         f"{COMMON_DIR}/esp_video.cc",
@@ -374,7 +684,8 @@ def revert(root: Path):
             print(f"已恢复: {rel}")
         else:
             print(f"无备份，跳过: {rel}")
-    for name in ("local_control.h", "local_control.cc"):
+    for name in ("local_control.h", "local_control.cc",
+                 "chassis_battery.h", "chassis_battery.cc"):
         path = root / BOARD_DIR / name
         if path.exists():
             path.unlink()
@@ -398,9 +709,9 @@ def main():
 
     # 先备份，便于回滚
     if not args.check:
-        for rel in [f"{BOARD_DIR}/esp_sparkbot_board.cc", f"{COMMON_DIR}/camera.h",
-                    f"{COMMON_DIR}/esp_video.h", f"{COMMON_DIR}/esp_video.cc",
-                    f"{BOARD_DIR}/config.json"]:
+        for rel in [f"{BOARD_DIR}/esp_sparkbot_board.cc", f"{BOARD_DIR}/config.h",
+                    f"{COMMON_DIR}/camera.h", f"{COMMON_DIR}/esp_video.h",
+                    f"{COMMON_DIR}/esp_video.cc", f"{BOARD_DIR}/config.json"]:
             bak = root / (rel + ".bak")
             src = root / rel
             if src.exists() and not bak.exists():

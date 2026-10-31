@@ -92,6 +92,14 @@ idf.py menuconfig      # Xiaozhi Assistant → Board Type → esp-sparkbot
 idf.py build flash monitor
 ```
 
+除了遥控与图传，补丁还会注入主体板的电池采样（GPIO14 分压）、底盘电量读取
+（经板间 UART 问 C2，需要底盘刷过 [`firmware/chassis/`](firmware/chassis/) 的补丁）
+以及 `self.battery.get_status` 语音工具，`/status` 因此多出 `batt` / `batt_mv` /
+`charging` 与 `chassis_*` 三兄弟，App 的电源卡才有数可显示。
+
+> 屏幕右上角的电量角标不在补丁内：它是表情（emote）显示方案里挂在 gfx 上的子对象，
+> 官方默认的 LVGL 界面没有这套渲染结构。电量在 App 与 `/status` 里都拿得到。
+
 ### 2. 选一个控制端
 
 **Android App**（`android/`，Kotlin + Jetpack Compose，包名 `com.shike.sparkbot`，
@@ -137,16 +145,16 @@ python3 client/sparkbot.py watch               # 终端里看图传
 ```
 .
 ├── firmware/              固件补丁
-│   ├── apply.py           把 LocalControl 注入 xiaozhi-esp32（幂等、可回滚）
-│   ├── local_control.h/.cc  8080 控制 + 8081 图传，复用现有 UART 与摄像头
+│   ├── apply.py           把遥控、图传与电量注入 xiaozhi-esp32（幂等、可回滚）
+│   ├── local_control.h/.cc   8080 控制 + 8081 图传，复用现有 UART 与摄像头
+│   ├── chassis_battery.h/.cc 经板间 UART 向底盘 C2 问电量
 │   └── emote_style/       240×240 表情素材与布局
 ├── android/               原生 App（Compose，四个页面 + Endpoint 抽象）
 ├── client/sparkbot.py     零依赖命令行客户端
 ├── remote/                远程访问配置模板（frps / frpc / Nginx / 极空间部署）
-├── docs/
-│   ├── remote-access.md   远程方案：为什么这么选、怎么落地、踩过哪些坑
-│   └── dev-log.md         开发日志：每个改动的原因、验证数据与失败尝试
-└── backup/                设备原始固件的快照（大文件不入库）
+└── docs/
+    ├── remote-access.md   远程方案：为什么这么选、怎么落地、踩过哪些坑
+    └── dev-log.md         开发日志：每个改动的原因、验证数据与失败尝试
 ```
 
 ## 文档

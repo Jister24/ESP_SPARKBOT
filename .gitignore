@@ -55,6 +55,6 @@ venv/
 .workbuddy/
 .claude/
 
-# ---------- 含个人信息的设备快照 ----------
-# 记录了 Wi-Fi SSID/密码、MAC、设备 UUID，不要公开
-backup/device_info.md
+# ---------- 设备快照与固件备份 ----------
+# 含 Wi-Fi SSID/密码、MAC、设备 UUID，以及 16MB 整片 flash 备份，不入库
+backup/
