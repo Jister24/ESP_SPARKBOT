@@ -141,12 +141,14 @@ App 侧用一个 `Endpoint` 密封接口把「网络位置」收成类型属性�
 git clone git@github.com:Jister24/xiaozhi-esp32-sparkbot.git
 cd xiaozhi-esp32-sparkbot
 . $IDF_PATH/export.sh                      # 需要 ESP-IDF v6.0.1+
-idf.py -DIDF_TARGET=esp32s3 -DBOARD_NAME=esp-sparkbot build
+python scripts/build.py espressif/esp-sparkbot
 idf.py -p /dev/cu.usbmodem* flash monitor
 ```
 
-> 目标必须显式给 `esp32s3`。缺了它 `idf.py` 一样报「编译成功」，但板级 `.obj` 一个都没编，
-> 烧进去还是老固件——这个坑踩过不止一次。
+> **别用裸 `idf.py build`。** 板型由 `CONFIG_BOARD_TYPE_ESP_SPARKBOT` 决定，这个宏是
+> `scripts/build.py` 从板级 `config.json` 合并进 sdkconfig 的，`-DBOARD_NAME=` 对 CMake
+> 不起作用。直接 idf.py 一样报 build complete、一样出 `xiaozhi.bin`，但板级源码一个都
+> 没编进去，烧了还是老固件——这个坑踩过不止一次。
 
 #### 可选：把改动叠在自己那份上游上
 
@@ -160,20 +162,20 @@ cd xiaozhi-esp32
 python3 /path/to/ESP_SPARKBOT/firmware/apply.py .          # 打补丁
 python3 /path/to/ESP_SPARKBOT/firmware/apply.py . --check  # 只看会改什么
 python3 /path/to/ESP_SPARKBOT/firmware/apply.py . --revert # 回滚
-idf.py -DIDF_TARGET=esp32s3 -DBOARD_NAME=esp-sparkbot build
+python scripts/build.py espressif/esp-sparkbot
 ```
 
 两条路重叠的部分：遥控与图传、GC2145 支持、图像 180° 纠正、主体板电池采样（GPIO14 分压）、
 底盘电量读取（经板间 UART 问 C2，需要底盘刷过 [`firmware/chassis/`](firmware/chassis/) 的补丁）、
-`self.battery.get_status` 语音工具、低功耗时切睡脸。`/status` 因此多出 `batt` / `batt_mv` /
-`charging` 与 `chassis_*` 三兄弟，App 的电源卡才有数可显示。
+`self.battery.get_status` 语音工具、低功耗时的省电与切表情。`/status` 因此多出 `batt` /
+`batt_mv` / `charging` 与 `chassis_*` 三兄弟，App 的电源卡才有数可显示。
 
-**补丁版少两样**，因为都挂在 emote 显示的 gfx 树上，官方默认的 LVGL 界面没有这套结构：
+**补丁版不碰显示方案**。固件仓在 240×240 上用的是 emote（表情）渲染，带自己的一套素材、
+布局和 gfx 叠加层；补丁版沿用上游默认的 LVGL 界面，所以这些都不在里面：
 
 - 屏幕右上角的电量角标（含百分比）。电量在 App 与 `/status` 里照样拿得到。
-- 重画的闭眼睡脸和 zzz 叠加层。补丁版能切到 `sleepy`，但用的是上游自带素材，
-  那时还是睁眼的变形动画。素材在 [`firmware/tools/`](firmware/tools/)，可用
-  `emote_sleep.py --install` 装进任意一份 checkout。
+- 重画的闭眼睡脸和 zzz 叠加层。素材生成脚本在 [`firmware/tools/`](firmware/tools/)，
+  但要用上得先切到 emote 显示方案——也就是固件仓的那套做法。
 
 ### 2. 选一个控制端
 

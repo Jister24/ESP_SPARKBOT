@@ -1410,3 +1410,90 @@ I (100893) EmoteDisplay: zzz overlay shown
 
 素材换过之后 `build/expression_assets.bin` 不会自己重建（CMake 只依赖打包脚本，
 不依赖素材文件），得先删掉再 build，否则烧进去的还是老图。
+
+## 二十六、固件源码迁出独立仓：apply.py 退回它该在的位置（2026-11-01）
+
+起因是一个提问：现在 GitHub 上的固件到底怎么维护的？翻完发现两件事。
+
+一是工作区仓里 `firmware/` 装的是 `apply.py`（806 行、按字符串锚点往上游源码里插代码）
+加几个整文件拷贝，不是固件源码本身。二是真正承载全部改动的分支 `sparkbot-local`
+**从来没推到过任何远端**——它的 `origin` 指向上游 `78/xiaozhi-esp32`，只能 pull 不能 push。
+17 个 commit、1819 行自有改动（剩下 9727 行是 mqtt 组件本地副本），只存在于本机一个目录。
+
+`apply.py` 的问题不在于它写得对不对，在于它在同时干两件事：既当交付物，又当唯一的历史
+记录载体。后者撑不住——补丁脚本没法还原 17 段演进，锚点漂移时也说不出原来为什么这么改。
+
+### 直接推为什么失败
+
+```bash
+git push -u sparkbot sparkbot-local
+# remote: fatal: did not receive expected object 4169407846181001...
+# error: remote unpack failed: index-pack failed
+```
+
+`did not receive expected object` 这种报错先怀疑对象库坏了，实际是**浅克隆**：
+
+```bash
+$ cat .git/shallow
+c435f99a88066029ec2dbd2d758c8cc9d051565b   # 正好是基线 commit
+$ git rev-parse --is-shallow-repository
+true
+```
+
+本地只有 c435f99 往后的对象，`38162d2` 这笔 commit 的父指针指向一个不存在的对象，
+pack 里补不齐，远端 index-pack 直接拒收。GitHub 也不接受 shallow push。
+
+### 解法：给本地提交造一个新根
+
+`unshallow` 能把历史补齐，但要拉上游全部 4000+ commit，之后每次同步都得背着。
+这个仓的定位就是「esp-sparkbot 定制固件」，上游历史在 GitHub 上本来就有，不必复制。
+
+于是把第一笔本地 commit（`38162d2 chore(sparkbot): 建立本地分支 baseline`）的树拿出来，
+挂到一个没有父的空 commit 上，作为新根，再把这笔之后的提交重放上去：
+
+```bash
+tree=$(git rev-parse 38162d2^{tree})
+new_root=$(git commit-tree $tree -m "chore(sparkbot): 导入 xiaozhi-esp32 上游快照并收拢本地改动")
+git branch sparkbot-publish sparkbot-local
+git rebase --onto $new_root 38162d2 sparkbot-publish
+```
+
+16 笔重放零冲突（父树一致，理论上也不会冲突）。之后逐字节校验：
+
+```bash
+git diff --stat sparkbot-local sparkbot-publish   # 空输出
+```
+
+### 现在的结构
+
+| | 内容 |
+|---|---|
+| `Jister24/xiaozhi-esp32-sparkbot` | 固件源码本体，18 commit，`.git` 6.4M，clone 即可编译 |
+| `Jister24/ESP_SPARKBOT`（工作区） | Android App、文档、`apply.py`（可选路径）、底盘补丁 |
+
+本地分支统一成一个：`sparkbot-local` 跟踪 `sparkbot/main`，靠 refspec 抹平名字差异。
+
+```bash
+git config --add remote.sparkbot.push refs/heads/sparkbot-local:refs/heads/main
+```
+
+以后 `git push sparkbot` 直接可用。`origin` 保留指向上游，要对比随时
+`git diff origin/main -- main/boards`。
+
+### 两个仓的 README 各自讲什么
+
+固件仓把上游 `README.md`（英文，讲通用板子怎么玩）改名成 `README.upstream.md`，
+新的讲四件事：相对上游改了什么、怎么编译、踩过的坑、硬件要点。改 README 会和上游
+冲突，但 README 冲突最好解，比让读者点进来看到一堆无关内容强。
+
+顺手改掉工作区 README 里两处不实描述：
+
+- 写的是「需要 ESP-IDF v5.4+」，上游现在要求 v6.0.1+。
+- 写的是「两条路改动一致」，实际补丁版少了电量角标和重画的闭眼睡脸。两者都挂在
+  emote 的 gfx anim 树上，LVGL 界面没有这套结构。文中已明确标出差异。
+
+### 验证
+
+clone 到干净目录，`git status` 无输出（说明仓库自包含，没靠本地残留文件），
+`local_components/mqtt` 在，`sdkconfig.defaults*` 里没有 `/Users/` 绝对路径，
+然后按 README 的命令实编一次通过。
