@@ -27,6 +27,39 @@
 
 「设备」页顶部可以在**局域网 / 远程**之间切换，下面四个页面完全共用——换连接方式不影响操作习惯。
 
+## 表情
+
+屏幕走的是 emote 动画方案（不是 LVGL）：一份 `.eaf` 里其实是**一只眼**，`layout.json` 的
+`eye_anim` 用 `mirror: auto` 左右各贴一次，才拼成一双。所以表情只有眼睛，没有嘴。
+
+![表情一览](docs/images/emotions-grid.png)
+
+10 个动画文件对应 21 个表情名，服务端下发哪个名字都能接住：
+
+| 文件 | 帧数 | 覆盖的表情名 |
+|---|---|---|
+| `Happy.eaf` | 42 | happy / laughing / funny / loving / embarrassed / confident / delicious / silly / relaxed |
+| `Sad.eaf` | 96 | sad |
+| `cry.eaf` | 43 | crying |
+| `sleep.eaf` | 118 | sleepy |
+| `angry.eaf` | 50 | angry |
+| `shocked.eaf` | 34 | surprised / shocked |
+| `confused.eaf` | 77 | thinking / confused |
+| `winking.eaf` | 14 | winking |
+| `neutral.eaf` | 88 | neutral / idle / robot_2 |
+| `listen.eaf` | 50 | 不是表情：唤醒后的聆听波形条，走 `SetStatus(LISTENING)` |
+
+上面这张图和动图 [`docs/images/emotions.gif`](docs/images/emotions.gif)（十宫格同时播放）
+都由 `firmware/tools/eaf_render.py` 从 `.eaf` 里解出来，用来核对素材、改配色或写文档：
+
+```bash
+python3 firmware/tools/eaf_render.py          # 总览图 + 十宫格动图
+python3 firmware/tools/eaf_render.py --list   # 只看清单与帧数
+```
+
+`.eaf` 素材属于 `espressif/esp_emote_assets` 组件，不在本仓库；脚本默认去
+`~/esp/xiaozhi-esp32/managed_components/` 下找，可用 `--assets` 指定。
+
 ## 两条链路，一套接口
 
 ```
@@ -148,11 +181,13 @@ python3 client/sparkbot.py watch               # 终端里看图传
 │   ├── apply.py           把遥控、图传与电量注入 xiaozhi-esp32（幂等、可回滚）
 │   ├── local_control.h/.cc   8080 控制 + 8081 图传，复用现有 UART 与摄像头
 │   ├── chassis_battery.h/.cc 经板间 UART 向底盘 C2 问电量
-│   └── emote_style/       240×240 表情素材与布局
+│   ├── emote_style/       240×240 表情素材与布局
+│   └── tools/eaf_render.py  把 .eaf 表情解码成 PNG / GIF
 ├── android/               原生 App（Compose，四个页面 + Endpoint 抽象）
 ├── client/sparkbot.py     零依赖命令行客户端
 ├── remote/                远程访问配置模板（frps / frpc / Nginx / 极空间部署）
 └── docs/
+    ├── images/            表情总览图与动图（由 tools/eaf_render.py 生成）
     ├── remote-access.md   远程方案：为什么这么选、怎么落地、踩过哪些坑
     └── dev-log.md         开发日志：每个改动的原因、验证数据与失败尝试
 ```
