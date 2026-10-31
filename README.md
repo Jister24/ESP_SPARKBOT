@@ -104,7 +104,7 @@ minSdk 26 / targetSdk 35）。
 > 下载后建议核对一下（`shasum -a 256 文件名`，Windows 用 `certutil -hashfile 文件名 SHA256`）：
 >
 > ```
-> 03cfc023b793e07eb41a84d53098caed8a3ca6bb30396f439b69a89fd55949a7
+> 2699fb783c521bf59765c27b1f5aceff873e26fa49eb70b9ca21913783e0d91c
 > ```
 
 自己编译：
