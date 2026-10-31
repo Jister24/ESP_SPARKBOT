@@ -27,7 +27,14 @@ object SparkApi {
         val batt: Int? = null,
         /** 主体板电芯电压（mV），同样可能缺失。 */
         val battMv: Int? = null,
-        val charging: Boolean = false
+        val charging: Boolean = false,
+        /**
+         * 履带底盘电量百分比。底盘那颗 C2 自己采样，主体板通过 UART 问来再塞进
+         * /status；没改过的底盘固件不会应答，所以这三个字段经常是 null。
+         */
+        val chassisBatt: Int? = null,
+        val chassisBattMv: Int? = null,
+        val chassisCharging: Boolean = false
     )
 
     private fun connect(
@@ -82,7 +89,10 @@ object SparkApi {
             rot = j.optBoolean("rot", true),
             batt = if (j.has("batt")) j.optInt("batt") else null,
             battMv = if (j.has("batt_mv")) j.optInt("batt_mv") else null,
-            charging = j.optBoolean("charging", false)
+            charging = j.optBoolean("charging", false),
+            chassisBatt = if (j.has("chassis_batt")) j.optInt("chassis_batt") else null,
+            chassisBattMv = if (j.has("chassis_batt_mv")) j.optInt("chassis_batt_mv") else null,
+            chassisCharging = j.optBoolean("chassis_charging", false)
         )
     }
 

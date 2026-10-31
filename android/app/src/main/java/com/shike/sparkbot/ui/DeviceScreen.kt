@@ -1,5 +1,6 @@
 package com.shike.sparkbot.ui
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -33,7 +34,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -192,10 +197,17 @@ private fun CurrentDevicePanel(state: UiState, vm: AppViewModel) {
             Metric("摄像头", if (state.status?.camera == true) "可用" else "—", Modifier.weight(1f))
         }
 
-        // 老固件的 /status 没有 batt 字段，这里静默不显示，不要摆一个假的 0%
+        // 老固件的 /status 没有 batt 字段，这里整块静默不显示，不要摆一个假的 0%
         state.status?.batt?.let { batt ->
-            Spacer(Modifier.height(10.dp))
-            BatteryBar(batt, state.status.battMv, state.status.charging)
+            Spacer(Modifier.height(12.dp))
+            PowerSection(
+                bodyPercent = batt,
+                bodyMillivolts = state.status.battMv,
+                bodyCharging = state.status.charging,
+                chassisPercent = state.status.chassisBatt,
+                chassisMillivolts = state.status.chassisBattMv,
+                chassisCharging = state.status.chassisCharging
+            )
         }
 
         if (state.scanning) {
@@ -226,33 +238,147 @@ private fun CurrentDevicePanel(state: UiState, vm: AppViewModel) {
     }
 }
 
+// 电量色阶：≤20% 红、≤50% 琥珀、其余青绿。和屏幕角标用同一套阈值，看起来才一致
+private fun levelColor(percent: Int): Color = when {
+    percent <= 20 -> Danger
+    percent <= 50 -> Color(0xFFFFB020)
+    else -> Teal
+}
+
+/**
+ * 电源区：本体 + 底盘各一块。
+ *
+ * 底盘电量是主体板通过 UART 问 C2 拿到的，没改过的底盘固件不会应答，
+ * 这时 chassisPercent 为 null，只画本体一块（不留空位）。
+ */
 @Composable
-private fun BatteryBar(percent: Int, millivolts: Int?, charging: Boolean) {
-    val safe = percent.coerceIn(0, 100)
-    Column(Modifier.fillMaxWidth()) {
+private fun PowerSection(
+    bodyPercent: Int,
+    bodyMillivolts: Int?,
+    bodyCharging: Boolean,
+    chassisPercent: Int?,
+    chassisMillivolts: Int?,
+    chassisCharging: Boolean
+) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(SurfaceHigh)
+            .padding(horizontal = 11.dp, vertical = 11.dp)
+    ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("电池", color = TextMuted, fontSize = 11.sp)
-            Spacer(Modifier.width(8.dp))
+            Text("电源", color = TextMuted, fontSize = 11.sp)
+            Spacer(Modifier.weight(1f))
+            if (chassisPercent == null) {
+                Text("底盘未上报", color = TextMuted.copy(alpha = 0.6f), fontSize = 10.sp)
+            }
+        }
+        Spacer(Modifier.height(9.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            BatteryTile(
+                label = "本体", percent = bodyPercent,
+                millivolts = bodyMillivolts, charging = bodyCharging,
+                modifier = Modifier.weight(1f)
+            )
+            if (chassisPercent != null) {
+                BatteryTile(
+                    label = "底盘", percent = chassisPercent,
+                    millivolts = chassisMillivolts, charging = chassisCharging,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun BatteryTile(
+    label: String,
+    percent: Int,
+    millivolts: Int?,
+    charging: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val safe = percent.coerceIn(0, 100)
+    val level = levelColor(safe)
+    Column(
+        modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(Surface)
+            .padding(horizontal = 11.dp, vertical = 10.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(label, color = TextMuted, fontSize = 11.sp)
+            Spacer(Modifier.weight(1f))
+            if (charging) {
+                Text(
+                    "充电",
+                    color = Teal, fontSize = 10.sp,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(Teal.copy(alpha = 0.14f))
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                )
+            }
+        }
+        Spacer(Modifier.height(5.dp))
+        Row(verticalAlignment = Alignment.Bottom) {
             Text(
-                buildString {
-                    append(safe)
-                    append('%')
-                    millivolts?.let {
-                        append(" · ")
-                        append(String.format(Locale.US, "%.2f V", it / 1000f))
-                    }
-                    if (charging) append(" · 充电中")
-                },
-                color = TextMain, fontSize = 12.sp, fontWeight = FontWeight.Medium
+                "$safe",
+                color = if (safe <= 20) Danger else TextMain,
+                fontSize = 25.sp, fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                "%", color = TextMuted, fontSize = 12.sp,
+                modifier = Modifier.padding(start = 1.dp, bottom = 4.dp)
             )
         }
+        Spacer(Modifier.height(7.dp))
+        BatteryGauge(safe, level)
         Spacer(Modifier.height(6.dp))
-        LinearProgressIndicator(
-            progress = { safe / 100f },
-            modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(50)),
-            color = if (safe <= 20) Danger else Teal,
-            trackColor = SurfaceHigh
+        Text(
+            // 充电状态已经由右上角的胶囊表达了，这里只说电压，别重复
+            millivolts?.let { String.format(Locale.US, "%.2f V", it / 1000f) } ?: "—",
+            color = TextMuted, fontSize = 11.sp
         )
+    }
+}
+
+/** 画成一个电池：外壳 + 内填充 + 正极触点，填充比例跟着百分比走 */
+@Composable
+private fun BatteryGauge(percent: Int, color: Color) {
+    val track = TextMuted.copy(alpha = 0.35f)
+    Canvas(Modifier.fillMaxWidth().height(11.dp)) {
+        val h = size.height
+        val capW = h * 0.32f
+        val gap = h * 0.14f
+        val bodyW = size.width - capW - gap
+        val stroke = (h * 0.15f).coerceAtLeast(1.2f)
+        drawRoundRect(
+            color = track,
+            topLeft = Offset(stroke / 2f, stroke / 2f),
+            size = Size(bodyW - stroke, h - stroke),
+            cornerRadius = CornerRadius(h * 0.28f),
+            style = Stroke(width = stroke)
+        )
+        drawRoundRect(
+            color = track,
+            topLeft = Offset(bodyW + gap, h * 0.31f),
+            size = Size(capW, h * 0.38f),
+            cornerRadius = CornerRadius(capW * 0.45f)
+        )
+        val inset = stroke + h * 0.1f
+        val maxWidth = bodyW - inset * 2f
+        val filled = maxWidth * (percent.coerceIn(0, 100) / 100f)
+        if (filled > 0f) {
+            drawRoundRect(
+                color = color,
+                topLeft = Offset(inset, inset),
+                size = Size(filled.coerceAtLeast(h * 0.18f), h - inset * 2f),
+                cornerRadius = CornerRadius(h * 0.18f)
+            )
+        }
     }
 }
 
