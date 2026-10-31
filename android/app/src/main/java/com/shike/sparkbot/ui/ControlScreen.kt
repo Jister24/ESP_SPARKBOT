@@ -2,9 +2,6 @@ package com.shike.sparkbot.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -35,7 +32,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -76,10 +72,20 @@ fun ControlScreen(state: UiState, vm: AppViewModel) {
             contentAlignment = Alignment.Center
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                DirectionPad(state, vm)
+                DirectionDial(
+                    enabled = state.online,
+                    holdVector = if (state.holding) state.holdVector else null,
+                    onDirection = { x, y -> vm.startHold(x, y) },
+                    onRelease = { vm.stopMotion() },
+                    size = 208.dp
+                )
                 Spacer(Modifier.height(16.dp))
                 Text(
-                    if (state.holding) "行进中…" else "按住方向键持续移动，松手即停",
+                    when {
+                        !state.online -> "设备离线"
+                        state.holding -> "${dirLabel(state.holdVector)} · ${(state.speed * 100).toInt()}%"
+                        else -> "拖动圆盘持续移动，松手即停"
+                    },
                     color = if (state.holding) Accent else TextMuted,
                     fontSize = 11.sp
                 )
@@ -120,32 +126,13 @@ fun ControlScreen(state: UiState, vm: AppViewModel) {
 
         Spacer(Modifier.height(14.dp))
 
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Button(
-                onClick = { vm.dance() },
-                modifier = Modifier.weight(1f).height(46.dp),
-                shape = RoundedCornerShape(14.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = SurfaceHigh)
-            ) {
-                Text("跳舞 d1", color = TextMain, fontSize = 13.sp)
-            }
-            Button(
-                onClick = { vm.toggleDeviceRotation() },
-                modifier = Modifier.weight(1f).height(46.dp),
-                shape = RoundedCornerShape(14.dp),
-                enabled = state.online && !state.rotBusy,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = SurfaceHigh,
-                    disabledContainerColor = Surface,
-                    disabledContentColor = TextMuted
-                )
-            ) {
-                Text(
-                    if (state.deviceRot) "画面：已转正" else "画面：原始",
-                    color = if (state.online && !state.rotBusy) TextMain else TextMuted,
-                    fontSize = 13.sp
-                )
-            }
+        Button(
+            onClick = { vm.dance() },
+            modifier = Modifier.fillMaxWidth().height(46.dp),
+            shape = RoundedCornerShape(14.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = SurfaceHigh)
+        ) {
+            Text("跳舞 d1", color = TextMain, fontSize = 13.sp)
         }
 
         Spacer(Modifier.height(20.dp))
@@ -198,84 +185,6 @@ fun ControlScreen(state: UiState, vm: AppViewModel) {
             color = TextMuted, fontSize = 11.sp, lineHeight = 18.sp
         )
         Spacer(Modifier.height(28.dp))
-    }
-}
-
-@Composable
-private fun DirectionPad(state: UiState, vm: AppViewModel) {
-    val cell = 84.dp
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        PadButton("▲", cell, enabled = state.online,
-            onStart = { vm.startHold(0f, 1f) }, onEnd = { vm.stopMotion() })
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            PadButton("◀", cell, enabled = state.online,
-                onStart = { vm.startHold(-1f, 0f) }, onEnd = { vm.stopMotion() })
-            Spacer(Modifier.width(10.dp))
-            Box(
-                Modifier
-                    .size(cell)
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(SurfaceHigh),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    if (state.holding) {
-                        val v = state.holdVector
-                        if (v != null) "${v.first.toInt()},${v.second.toInt()}" else "···"
-                    } else {
-                        "方向"
-                    },
-                    color = if (state.holding) Accent else TextMuted,
-                    fontSize = 12.sp
-                )
-            }
-            Spacer(Modifier.width(10.dp))
-            PadButton("▶", cell, enabled = state.online,
-                onStart = { vm.startHold(1f, 0f) }, onEnd = { vm.stopMotion() })
-        }
-        PadButton("▼", cell, enabled = state.online,
-            onStart = { vm.startHold(0f, -1f) }, onEnd = { vm.stopMotion() })
-    }
-}
-
-@Composable
-private fun PadButton(
-    label: String,
-    size: androidx.compose.ui.unit.Dp,
-    enabled: Boolean,
-    onStart: () -> Unit,
-    onEnd: () -> Unit
-) {
-    var pressed by remember { mutableStateOf(false) }
-    Box(
-        Modifier
-            .size(size)
-            .clip(RoundedCornerShape(20.dp))
-            .background(
-                when {
-                    pressed -> Accent
-                    enabled -> SurfaceHigh
-                    else -> Surface
-                }
-            )
-            .pointerInput(enabled) {
-                if (!enabled) return@pointerInput
-                awaitEachGesture {
-                    awaitFirstDown(requireUnconsumed = false)
-                    pressed = true
-                    onStart()
-                    waitForUpOrCancellation()
-                    pressed = false
-                    onEnd()
-                }
-            },
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            label,
-            color = if (enabled) TextMain else TextMuted,
-            fontSize = 24.sp
-        )
     }
 }
 
