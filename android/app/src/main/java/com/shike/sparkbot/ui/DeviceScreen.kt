@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.sp
 import com.shike.sparkbot.AppViewModel
 import com.shike.sparkbot.UiState
 import com.shike.sparkbot.net.LinkMode
+import java.util.Locale
 
 @Composable
 fun DeviceScreen(state: UiState, vm: AppViewModel) {
@@ -191,6 +192,12 @@ private fun CurrentDevicePanel(state: UiState, vm: AppViewModel) {
             Metric("摄像头", if (state.status?.camera == true) "可用" else "—", Modifier.weight(1f))
         }
 
+        // 老固件的 /status 没有 batt 字段，这里静默不显示，不要摆一个假的 0%
+        state.status?.batt?.let { batt ->
+            Spacer(Modifier.height(10.dp))
+            BatteryBar(batt, state.status.battMv, state.status.charging)
+        }
+
         if (state.scanning) {
             Spacer(Modifier.height(14.dp))
             LinearProgressIndicator(
@@ -216,6 +223,36 @@ private fun CurrentDevicePanel(state: UiState, vm: AppViewModel) {
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun BatteryBar(percent: Int, millivolts: Int?, charging: Boolean) {
+    val safe = percent.coerceIn(0, 100)
+    Column(Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("电池", color = TextMuted, fontSize = 11.sp)
+            Spacer(Modifier.width(8.dp))
+            Text(
+                buildString {
+                    append(safe)
+                    append('%')
+                    millivolts?.let {
+                        append(" · ")
+                        append(String.format(Locale.US, "%.2f V", it / 1000f))
+                    }
+                    if (charging) append(" · 充电中")
+                },
+                color = TextMain, fontSize = 12.sp, fontWeight = FontWeight.Medium
+            )
+        }
+        Spacer(Modifier.height(6.dp))
+        LinearProgressIndicator(
+            progress = { safe / 100f },
+            modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(50)),
+            color = if (safe <= 20) Danger else Teal,
+            trackColor = SurfaceHigh
+        )
     }
 }
 

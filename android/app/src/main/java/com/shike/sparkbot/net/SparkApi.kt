@@ -22,7 +22,12 @@ object SparkApi {
         val y: Float,
         val uptimeSec: Long,
         val camera: Boolean,
-        val rot: Boolean
+        val rot: Boolean,
+        /** 主体板电量百分比；老固件的 /status 没有这个字段，为 null 时不显示。 */
+        val batt: Int? = null,
+        /** 主体板电芯电压（mV），同样可能缺失。 */
+        val battMv: Int? = null,
+        val charging: Boolean = false
     )
 
     private fun connect(
@@ -74,7 +79,10 @@ object SparkApi {
             y = j.optDouble("y", 0.0).toFloat(),
             uptimeSec = j.optLong("uptime_s", 0L),
             camera = j.optBoolean("camera", false),
-            rot = j.optBoolean("rot", true)
+            rot = j.optBoolean("rot", true),
+            batt = if (j.has("batt")) j.optInt("batt") else null,
+            battMv = if (j.has("batt_mv")) j.optInt("batt_mv") else null,
+            charging = j.optBoolean("charging", false)
         )
     }
 
