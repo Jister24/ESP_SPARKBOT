@@ -1497,3 +1497,63 @@ git config --add remote.sparkbot.push refs/heads/sparkbot-local:refs/heads/main
 clone 到干净目录，`git status` 无输出（说明仓库自包含，没靠本地残留文件），
 `local_components/mqtt` 在，`sdkconfig.defaults*` 里没有 `/Users/` 绝对路径，
 然后按 README 的命令实编一次通过。
+
+## 二十七、底盘固件终于刷进去了：CH340 + 控制台口 74880（2026-11-01 已验证）
+
+### 起因是一次误判
+
+用户报「底盘连不上，怀疑 CP210 驱动没装」。实测下来驱动完全无关，而且芯片根本不是 CP210：
+
+| 判据 | 结果 |
+|---|---|
+| `ioreg -p IOUSB` | 有 `USB Serial`，`idVendor=0x1A86 / idProduct=0x7523` → **CH340**，不是 CP210（0x10C4:0xEA60） |
+| `/dev/cu.*` | `/dev/cu.usbserial-14410`，没装任何驱动 |
+| `systemextensionsctl list` | 0 个第三方扩展 |
+
+**诊断口诀**：驱动缺失不会让设备从 USB 树里消失，只会拿不到 `/dev/cu.*` 端口。
+先看 USB 树有没有这颗芯片，就能一刀切开「驱动没装」和「线/供电没通」——那次插上后
+USB 树里空无一物，连雷电总线都报 `No device connected`，说明物理层就没接上。
+
+### 为什么「能看日志但发指令没反应」
+
+查上游 `c2_tracked_chassis` 才发现底盘有两个串口，各管一摊：
+
+| 口 | 引脚 | 波特率 | 用途 |
+|---|---|---|---|
+| UART0 | GPIO19(TX) / GPIO20(RX) | **74880**（`CONFIG_ESP_CONSOLE_UART_BAUDRATE`） | 控制台，只往外打日志，**不解析输入** |
+| UART1 | GPIO10(TX) / GPIO18(RX) | 115200 | 主机指令口 = 4P 磁吸口 → 主体板 GPIO38/48 |
+
+所以用 115200 读控制台必然是乱码（实测可读率 31.9%，换 74880 就是 100%），
+而在这个口上发 `b0`、`x y` 没有回显也是正常的，不是线接错。
+
+### 能刷了
+
+`esptool chip_id` 直接进了下载模式，说明 EN/BOOT 飞线是通的（打开串口会复位一次就是佐证）：
+
+```
+ESP32-C2 rev2.0 / Crystal 26MHz / flash 2MB / MAC b8:7b:4d:b4:05:8c
+```
+
+- **备份**：`read_flash 0 0x200000 /tmp/chassis_backup_20261101.bin`（2MB，188 秒，sha256 `71059ec8…`）
+- **坑**：460800 下 CH340 会丢 4 字节（`expected 0x1000 but received 0xffc`），读写都得降到 115200
+- 补丁早已在工作区里（`git apply --check --reverse` 通过，113 行逐字一致），ninja 无需重编
+- 只烧 app 分区（`idf.py app-flash`），不动 bootloader——它本来就是好的，换它只增加失败面
+- 校验：新 bin 含 `B:%d:%d:%d`，设备原固件不含；app 0x39f50，分区还剩 77%
+
+### 验证：不用自己发命令，主体板在替我们发
+
+刷完静置 15 秒，**一个字都不发**，控制台上出现：
+
+```
+I (5420)  Tracked-Chassis: Command: b, Value: 0.00
+I (10430) Tracked-Chassis: Command: b, Value: 0.00   ← 间隔 5.01s
+```
+
+5 秒周期正好是主体板 `ChassisBattery::kPollIntervalUs`。这说明：主体板连着底盘、
+一直在发 `b0`、底盘新版固件正在解析它。旧固件跑的时候这个位置是 `Unknown command`（或干脆没日志）。
+
+App 版本号也从原厂的 `1` 变成 `d42c5b4-dirty`，编译时间 `Oct 31 2026 22:18:18`。
+
+**没验证到的一段**：`B:` 应答是从 UART1 TX 发给主体板的，控制台看不到；主体板也不在本机
+所在网段（Mac 只有有线 192.168.5.x），没法用 `/status` 复核 `chassis_batt`。
+最终确认要看 App 的电源卡——底盘那张卡片有百分比就是通了。
