@@ -166,7 +166,8 @@ python scripts/build.py espressif/esp-sparkbot
 ```
 
 两条路重叠的部分：遥控与图传、GC2145 支持、图像 180° 纠正、主体板电池采样（GPIO14 分压）、
-底盘电量读取（经板间 UART 问 C2，需要底盘刷过 [`firmware/chassis/`](firmware/chassis/) 的补丁）、
+底盘电量读取（经板间 UART 问 C2，需要底盘刷过
+[esp-sparkbot-chassis](https://github.com/Jister24/esp-sparkbot-chassis) 的固件）、
 `self.battery.get_status` 语音工具、低功耗时的省电与切表情。`/status` 因此多出 `batt` /
 `batt_mv` / `charging` 与 `chassis_*` 三兄弟，App 的电源卡才有数可显示。
 
@@ -225,7 +226,7 @@ python3 client/sparkbot.py watch               # 终端里看图传
 │   ├── apply.py           可选：把遥控、图传与电量注入现成的 xiaozhi-esp32（幂等、可回滚）
 │   ├── local_control.h/.cc   8080 控制 + 8081 图传，复用现有 UART 与摄像头
 │   ├── chassis_battery.h/.cc 经板间 UART 向底盘 C2 问电量
-│   ├── chassis/           底盘（ESP32-C2）补丁与飞线说明
+│   ├── chassis/           底盘（ESP32-C2）补丁说明与固件仓指引
 │   ├── emote_style/       240×240 表情素材与布局
 │   └── tools/             .eaf 解码渲染 / 编码器 / 睡脸与 zzz 素材生成
 ├── android/               原生 App（Compose，四个页面 + Endpoint 抽象）
@@ -256,8 +257,8 @@ python3 client/sparkbot.py watch               # 终端里看图传
 - **账号页是内嵌 WebView**。官方没有公开 API，全原生重写等于逆向一套随时会变的私有接口。
 - **电量是开路电压估算**。百分比按 11 点 OCV 曲线插值，带载时读数会被拉低，快充满时
   会偏乐观；充电状态没有硬件指示脚，是「电压趋势」推断出来的。底盘那块电池由 C2 自己的
-  ADC 采样后经 UART 上报，但底盘 PCB 上的 USB 口只供电、不走数据，要刷这部分固件得从
-  C2 的 UART0/EN/GPIO9 测试点飞线。
+  ADC 采样后经 UART 上报；底盘 PCB 上的 USB 口**是数据口**（板载 CH340 桥到 C2 的 UART0，
+  控制台 74880，带自动下载电路），插根线就能看日志、能刷固件，不用飞线。
 - 远程模式的凭据以明文存在 SharedPreferences，自用足够，多用户场景需要换成短期 token。
 
 ## 致谢
