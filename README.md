@@ -244,7 +244,6 @@ python3 client/sparkbot.py watch               # 终端里看图传
 | [docs/remote-access.md](docs/remote-access.md) | 远程访问方案：六种选型的淘汰理由、架构、按层分组的踩坑表、`Endpoint` 设计 |
 | [docs/dev-log.md](docs/dev-log.md) | 开发日志：为什么原本连不上、帧率上限的实测依据、画面倒立的根因、每一项验证数据 |
 | [remote/nas-deploy.md](remote/nas-deploy.md) | 极空间 Z2Pro 部署 frpc 的逐项操作与容器内排障 |
-| [firmware/wakeword-request-doubaodoubao.md](firmware/wakeword-request-doubaodoubao.md) | 唤醒词定制说明 |
 
 ## 已知限制
 
