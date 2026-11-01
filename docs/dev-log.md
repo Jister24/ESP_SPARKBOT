@@ -1520,7 +1520,7 @@ USB 树里空无一物，连雷电总线都报 `No device connected`，说明物
 
 | 口 | 引脚 | 波特率 | 用途 |
 |---|---|---|---|
-| UART0 | GPIO19(TX) / GPIO20(RX) | **74880**（`CONFIG_ESP_CONSOLE_UART_BAUDRATE`） | 控制台，只往外打日志，**不解析输入** |
+| UART0 | GPIO20(TX) / GPIO19(RX) | **74880**（`CONFIG_ESP_CONSOLE_UART_BAUDRATE`） | 控制台，只往外打日志，**不解析输入** |
 | UART1 | GPIO10(TX) / GPIO18(RX) | 115200 | 主机指令口 = 4P 磁吸口 → 主体板 GPIO38/48 |
 
 所以用 115200 读控制台必然是乱码（实测可读率 31.9%，换 74880 就是 100%），

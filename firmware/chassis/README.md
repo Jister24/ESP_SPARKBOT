@@ -1,5 +1,9 @@
 # 底盘固件改动：让 C2 上报电量
 
+> **2026-11-01 更新：已经刷进底盘并验证。源码独立成仓 → [Jister24/esp-sparkbot-chassis](https://github.com/Jister24/esp-sparkbot-chassis)**
+> 那个仓能直接 `idf.py build`，`v1.0.0` Release 里放了实际烧过的 `tracked_chassis.bin`。
+> 本目录的补丁保留作历史记录，新改动请去新仓。
+
 底盘主控是 ESP32-C2，官方固件其实一直在采自己的电池，但只拿去控制 RGB 灯，数据不对外。
 这里加一条 UART 查询，让主体板（S3）能问出电量和充电状态。
 
@@ -52,11 +56,22 @@ idf.py build
 用 IDF 6 编译会在 `led_strip 2.5.5` / `led_indicator` 上报缺头文件（`esp_heap_caps.h`、
 `driver/ledc.h` 的传递包含在 6.0 被移除了）。
 
-## 烧录（需要先接出测试点）
+## 烧录（2026-11-01 实测流程）
+
+需要飞线 6 根到 C2 的测试点：`3V3 / GND / U0TXD(GPIO20) / U0RXD(GPIO19) / EN / GPIO9`。
+USB-TTL 用 CH340 或 CP2102 都行（macOS 26 对两者都免驱），**共地必须接**。
 
 ```bash
-idf.py -p /dev/cu.usbserial-XXXX flash
+# 1. 先备份整片，出事能回去
+esptool.py -p /dev/cu.usbserial-XXXX -b 115200 read_flash 0 0x200000 chassis_backup.bin
+
+# 2. 只刷 app 分区，不碰 bootloader
+idf.py -p /dev/cu.usbserial-XXXX -b 115200 app-flash
 ```
 
+两个坑：**CH340 在 460800 下会丢字节**（`expected 0x1000 but received 0xffc`），读写都要 115200；
+**控制台是 74880 不是 115200**（`CONFIG_ESP_CONSOLE_UART_BAUDRATE`），用 115200 读出来是乱码。
+
 刷完把线拆掉，把底盘装回去。主体板那边只要固件是新的，会自动开始每 5 秒问一次；
-`/status` 里出现 `chassis_batt` 就说明通了。
+`/status` 里出现 `chassis_batt` 就说明通了。刷机时想确认成功，直接在 74880 的控制台上看
+有没有 `Tracked-Chassis: Command: b`（那是主体板在轮询）。
