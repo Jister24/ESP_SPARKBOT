@@ -6,6 +6,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
 import java.net.Inet4Address
 import java.net.InetSocketAddress
 import java.net.NetworkInterface
@@ -23,11 +24,12 @@ object Discovery {
         val candidates = mutableListOf<Pair<Int, String>>()
         for (nif in Collections.list(interfaces)) {
             if (!nif.isUp || nif.isLoopback) continue
-            // Wi-Fi / 有线优先，避免拿到蜂窝网的 10.x 网段
+            // 只认 Wi-Fi / 有线。蜂窝网也是 site-local（10.x），拿它扫 254 个地址纯属空转，
+            // 而且容易让人误以为「设备不在网里」。
             val rank = when {
                 nif.name.startsWith("wlan") -> 0
                 nif.name.startsWith("en") || nif.name.startsWith("eth") -> 1
-                else -> 2
+                else -> continue
             }
             for (addr in Collections.list(nif.inetAddresses)) {
                 if (addr is Inet4Address && addr.isSiteLocalAddress && !addr.isLinkLocalAddress) {
@@ -40,6 +42,19 @@ object Discovery {
         }
         return candidates.minByOrNull { it.first }?.second
     }
+
+    /** 单点可达性探测，用于「切回局域网时先验证上次的 IP 还在不在」。 */
+    suspend fun probe(ip: String, timeoutMs: Int): SparkApi.Status? =
+        withContext(Dispatchers.IO) {
+            try {
+                Socket().use { socket ->
+                    socket.connect(InetSocketAddress(ip, SparkApi.CTRL_PORT), timeoutMs)
+                }
+            } catch (_: Exception) {
+                return@withContext null
+            }
+            runCatching { SparkApi.status(Endpoint.Lan(ip), timeoutMs * 2) }.getOrNull()
+        }
 
     /**
      * 两轮扫描。

@@ -110,6 +110,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private var fpsMark = 0L
     private var webView: WebView? = null
 
+    /** 上次扫描时间，给「离线自动重扫」做节流，别把 Wi-Fi 打爆。 */
+    private var lastAutoScanAt = 0L
+
     init {
         if (_state.value.mode == LinkMode.REMOTE) {
             startPolling()
@@ -145,6 +148,33 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         } else {
             startPolling()
             emit("已切换到局域网直连")
+            // 远程模式下可能待了半天，设备这期间重启/续租会换 IP，
+            // 或者手机刚从 5G 切回 Wi-Fi —— 直接拿旧地址轮询只会一直显示离线。
+            verifyLanTarget()
+        }
+    }
+
+    /**
+     * 切回局域网时先探一次上次用的 IP：
+     * 通就正常轮询，不通立刻重扫并接管扫到的设备，不用用户自己去点「扫描局域网」。
+     */
+    private fun verifyLanTarget() {
+        val ip = _state.value.currentIp
+        if (ip == null) {
+            scan(auto = true)
+            return
+        }
+        viewModelScope.launch {
+            val status = Discovery.probe(ip, 2000)
+            if (status != null) {
+                if (_state.value.mode == LinkMode.LAN) {
+                    _state.update { it.copy(status = status) }
+                }
+                return@launch
+            }
+            if (_state.value.mode != LinkMode.LAN) return@launch
+            emit("连不上 $ip，正在重新扫描局域网…")
+            scan(auto = true)
         }
     }
 
@@ -229,18 +259,19 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     @SuppressLint("MissingPermission")
-    fun scan() {
+    fun scan(auto: Boolean = false) {
         if (_state.value.scanning) return
         if (_state.value.mode == LinkMode.REMOTE) {
-            emit("远程模式不用扫描，切回局域网再扫")
+            if (!auto) emit("远程模式不用扫描，切回局域网再扫")
             return
         }
         viewModelScope.launch {
+            lastAutoScanAt = SystemClock.elapsedRealtime()
             _state.update { it.copy(scanning = true, scanDone = 0) }
             val prefix = Discovery.localPrefix()
             if (prefix == null) {
                 _state.update { it.copy(scanning = false) }
-                emit("未连上 Wi-Fi，请先连到设备所在局域网")
+                emit("手机没连 Wi-Fi，先连上机器人所在的同一个路由器")
                 return@launch
             }
             val found = withContext(Dispatchers.IO) {
@@ -264,12 +295,31 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             }
             _state.update { it.copy(scanning = false) }
             if (found.isEmpty()) {
-                emit("$prefix.0/24 网段没找到设备，可手动输入 IP")
+                val saved = _state.value.currentIp?.substringBeforeLast('.')
+                if (saved != null && saved != prefix) {
+                    emit("手机在 $prefix.0/24，设备记的是 $saved.0/24，不在同一张网")
+                } else {
+                    emit("$prefix.0/24 网段没找到设备，可手动输入 IP")
+                }
             } else {
-                emit("发现 ${found.size} 台设备")
-                if (_state.value.currentIp == null) selectDevice(found.first().ip, notify = false)
+                adoptFound(found)
             }
         }
+    }
+
+    /**
+     * 扫到设备后接管：原来选的设备不在结果里（多半是重启后换了 IP）就直接换过去，
+     * 否则保持用户的选择不动。
+     */
+    private fun adoptFound(found: List<Discovery.Found>) {
+        val current = _state.value.currentIp
+        if (current != null && found.any { it.ip == current }) {
+            emit("发现 ${found.size} 台设备")
+            return
+        }
+        val target = found.first()
+        selectDevice(target.ip, notify = false)
+        emit(if (current == null) "已连接 ${target.ip}" else "设备已换到 ${target.ip}，已自动连上")
     }
 
     // ---------------- 状态轮询 ----------------
@@ -296,6 +346,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     failures += 1
                     if (failures >= 3) {
                         _state.update { it.copy(status = null, latencyMs = null) }
+                        // 局域网里连续离线，多半是设备换了 IP（DHCP 续租/重启），
+                        // 自动重扫一次并接管，省得用户手动点扫描。
+                        if (_state.value.mode == LinkMode.LAN) {
+                            val now = SystemClock.elapsedRealtime()
+                            if (!_state.value.scanning && now - lastAutoScanAt > AUTO_SCAN_GAP_MS) {
+                                lastAutoScanAt = now
+                                emit("设备离线，正在重新扫描局域网…")
+                                scan(auto = true)
+                            }
+                        }
                     }
                 }
                 delay(3000)
@@ -715,6 +775,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
         /** 设备空闲时 /status 只要几十毫秒，忙起来（图传编码、停流刷屏）能到 2 秒。 */
         private const val STATUS_TIMEOUT_MS = 5000
+
+        /** 离线自动重扫的最小间隔：一次 /24 扫描要十秒左右，太频繁会白耗电。 */
+        private const val AUTO_SCAN_GAP_MS = 60_000L
 
         private val IP_REGEX = Regex("""^(\d{1,3}\.){3}\d{1,3}$""")
     }

@@ -190,6 +190,16 @@ private fun CurrentDevicePanel(state: UiState, vm: AppViewModel) {
         Spacer(Modifier.height(4.dp))
         Text(address, color = TextMuted, fontSize = 13.sp)
 
+        // 局域网里连着离线，九成是设备重启后换了 IP：把可能的原因直接写在脸上，
+        // 别让人对着「离线」两个字猜。
+        if (!remote && state.hasTarget && !state.online && !state.scanning) {
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "连不上这个地址。设备重启或 Wi-Fi 重连后 IP 可能会变，点右上角「扫描局域网」重新找一次。",
+                color = Color(0xFFFFB020), fontSize = 11.sp, lineHeight = 17.sp
+            )
+        }
+
         Spacer(Modifier.height(14.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Metric("延迟", state.latencyMs?.let { "$it ms" } ?: "—", Modifier.weight(1f))
