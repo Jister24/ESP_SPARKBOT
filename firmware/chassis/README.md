@@ -1,8 +1,11 @@
 # 底盘固件改动：让 C2 上报电量
 
 > **2026-11-01 更新：已经刷进底盘并验证。源码独立成仓 → [Jister24/esp-sparkbot-chassis](https://github.com/Jister24/esp-sparkbot-chassis)**
-> 那个仓能直接 `idf.py build`，`v1.0.0` Release 里放了实际烧过的 `tracked_chassis.bin`。
+> 那个仓能直接 `idf.py build`，`v1.0.1` Release 里放了实际烧过的 `tracked_chassis.bin`。
 > 本目录的补丁保留作历史记录，新改动请去新仓。
+>
+> **注意**：本机底盘的电机接线与上游假设相反（M1 驱动物理右轮、M2 驱动物理左轮且极性反），
+> 新仓已加接线补偿。这份历史补丁**不含**该修正，直接拿来刷会导致前进变原地转、转向变直行。
 
 底盘主控是 ESP32-C2，官方固件其实一直在采自己的电池，但只拿去控制 RGB 灯，数据不对外。
 这里加一条 UART 查询，让主体板（S3）能问出电量和充电状态。
