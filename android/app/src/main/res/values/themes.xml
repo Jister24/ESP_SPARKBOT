@@ -1,9 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.SparkBot" parent="android:Theme.Material.NoActionBar">
+    <!-- 默认（浅色）主题：白底所以要深色状态栏图标，否则图标看不见 -->
+    <style name="Theme.SparkBot" parent="android:Theme.Material.Light.NoActionBar">
         <item name="android:windowBackground">@color/bg</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
-        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightStatusBar">true</item>
     </style>
 </resources>

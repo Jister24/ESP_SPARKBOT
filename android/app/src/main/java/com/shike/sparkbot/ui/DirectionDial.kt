@@ -127,6 +127,13 @@ fun DirectionDial(
                 }
             }
     ) {
+        // Canvas 的 draw lambda 不是 composable 作用域，颜色得先在这里取出来
+        val cBg = Bg
+        val cSurface = Surface
+        val cSurfaceHigh = SurfaceHigh
+        val cAccent = Accent
+        val cLine = Line
+        val cTextMuted = TextMuted
         Canvas(Modifier.fillMaxSize()) {
             val r = this.size.width.coerceAtMost(this.size.height) / 2f
             val c = Offset(this.size.width / 2f, this.size.height / 2f)
@@ -135,7 +142,7 @@ fun DirectionDial(
             // 盘面：中心亮、边缘暗，做出一点凹陷的观感
             drawCircle(
                 brush = Brush.radialGradient(
-                    colors = listOf(SurfaceHigh, Surface, Bg),
+                    colors = listOf(cSurfaceHigh, cSurface, cBg),
                     center = c,
                     radius = r
                 ),
@@ -143,7 +150,7 @@ fun DirectionDial(
                 center = c
             )
             drawCircle(
-                color = if (lit) Accent.copy(alpha = 0.55f) else Line,
+                color = if (lit) cAccent.copy(alpha = 0.55f) else cLine,
                 radius = r - ringW / 2f,
                 center = c,
                 style = Stroke(ringW)
@@ -155,8 +162,8 @@ fun DirectionDial(
                 val d = Offset(cos(a).toFloat(), -sin(a).toFloat())
                 val cardinal = i % 2 == 0
                 drawLine(
-                    color = if (i == sector) Accent
-                    else TextMuted.copy(alpha = (if (cardinal) 0.45f else 0.22f) * dim),
+                    color = if (i == sector) cAccent
+                    else cTextMuted.copy(alpha = (if (cardinal) 0.45f else 0.22f) * dim),
                     start = c + d * (r * (if (cardinal) 0.84f else 0.88f)),
                     end = c + d * (r * 0.95f),
                     strokeWidth = if (cardinal) 2.dp.toPx() else 1.3.dp.toPx(),
@@ -167,7 +174,7 @@ fun DirectionDial(
             // 当前扇区的高亮扇形（像雷达扫过的那一块）
             if (sector >= 0) {
                 drawArc(
-                    color = Accent.copy(alpha = 0.16f),
+                    color = cAccent.copy(alpha = 0.16f),
                     startAngle = -(sector * 45.0 + 22.5).toFloat(),
                     sweepAngle = 45f,
                     useCenter = true,
@@ -194,13 +201,13 @@ fun DirectionDial(
                 }
                 drawPath(
                     path,
-                    color = if (k == sector) Accent else TextMuted.copy(alpha = 0.9f * dim)
+                    color = if (k == sector) cAccent else cTextMuted.copy(alpha = 0.9f * dim)
                 )
             }
 
             // 中位标记
             drawCircle(
-                color = TextMuted.copy(alpha = 0.32f * dim),
+                color = cTextMuted.copy(alpha = 0.32f * dim),
                 radius = 3.dp.toPx(),
                 center = c,
                 style = Stroke(1.dp.toPx())
@@ -210,17 +217,17 @@ fun DirectionDial(
             val kc = c + knob
             val knobR = 28.dp.toPx()
             if (lit) {
-                drawCircle(Accent.copy(alpha = 0.20f), radius = knobR * 1.5f, center = kc)
+                drawCircle(cAccent.copy(alpha = 0.20f), radius = knobR * 1.5f, center = kc)
             }
-            drawCircle(SurfaceHigh, radius = knobR, center = kc)
+            drawCircle(cSurfaceHigh, radius = knobR, center = kc)
             drawCircle(
-                color = if (lit) Accent else TextMuted.copy(alpha = 0.45f * dim),
+                color = if (lit) cAccent else cTextMuted.copy(alpha = 0.45f * dim),
                 radius = knobR,
                 center = kc,
                 style = Stroke(2.dp.toPx())
             )
             if (lit) {
-                drawCircle(Accent, radius = knobR * 0.32f, center = kc)
+                drawCircle(cAccent, radius = knobR * 0.32f, center = kc)
             }
         }
     }

@@ -196,7 +196,7 @@ private fun CurrentDevicePanel(state: UiState, vm: AppViewModel) {
             Spacer(Modifier.height(6.dp))
             Text(
                 "连不上这个地址。设备重启或 Wi-Fi 重连后 IP 可能会变，点右上角「扫描局域网」重新找一次。",
-                color = Color(0xFFFFB020), fontSize = 11.sp, lineHeight = 17.sp
+                color = Warn, fontSize = 11.sp, lineHeight = 17.sp
             )
         }
 
@@ -249,9 +249,10 @@ private fun CurrentDevicePanel(state: UiState, vm: AppViewModel) {
 }
 
 // 电量色阶：≤20% 红、≤50% 琥珀、其余青绿。和屏幕角标用同一套阈值，看起来才一致
+@Composable
 private fun levelColor(percent: Int): Color = when {
     percent <= 20 -> Danger
-    percent <= 50 -> Color(0xFFFFB020)
+    percent <= 50 -> Warn
     else -> Teal
 }
 
@@ -606,7 +607,7 @@ private fun TipsCard(mode: LinkMode) {
         Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(14.dp))
-            .background(Color(0xFF101821))
+            .background(Field)
             .padding(14.dp)
     ) {
         Column {
