@@ -247,22 +247,30 @@ def check(host: str) -> int:
     verdict = '够用' if cur_dz >= noise * 3 else '偏小，抖动会漏过去'
     print(f"静止抖动 sd x{nx:.2f}° y{ny:.2f}°；当前死区 {cur_dz}°（{verdict}）")
 
+    # 固件在线估出来的陀螺零偏，能直接看出这颗芯片的偏置水平
+    try:
+        d = fetch(host, "/imu")
+        gb = d.get("gbias")
+        if gb:
+            print(f"在线估计的陀螺零偏 {gb[0]:+.2f} {gb[1]:+.2f} {gb[2]:+.2f} dps"
+                  "（z 轴不可观测，别当真）")
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, KeyError):
+        pass
+
     print()
-    ok = worst_abs <= 5.0 and worst_rel <= 12.0
+    ok = worst_abs <= 2.0 and worst_rel <= 5.0
     if ok:
-        print(f"✓ 通过：最大偏差 {worst_abs:.1f}°（{worst_rel:.0f}%），"
+        print(f"✓ 通过：最大偏差 {worst_abs:.2f}°（{worst_rel:.0f}%），"
               "姿态解算可信，可以拿来映射成摇杆")
     else:
         print(f"✗ 偏差偏大：最大 {worst_abs:.1f}°（{worst_rel:.0f}%）")
-        print("  常见原因：① 采样时手在抖（重新摆稳再测一次）")
-        print("            ② 大角度下欧拉角相减的固有误差（见下方说明）")
+        print("  常见原因：① 采样时手在抖（摆稳再测一次）")
+        print("            ② 固件不是四元数版本（欧拉角相减在大角度会过读 4~9°）")
     if mag_spread > 1.5:
         print("⚠ 各姿势重力模长不一致，加速度计刻度或零偏有问题，角度不可全信")
     print()
-    print("说明：固件的 tilt_x/tilt_y 是「两路独立欧拉角分别减零点」。单轴倾斜完全")
-    print("      精确；两轴同时倾时，向量和会比真实转角大一点——按固件公式模拟，")
-    print("      30~40° 区间平均过读 1°、极端斜角最多 ~9°。对摇杆来说约 3% 的比例")
-    print("      误差，感受不到；若上表偏差远超这个量级，才是真有问题。")
+    print("说明：阈值为 2° / 5%。四元数解算在原理上严格精确，实测偏差应接近 0；")
+    print("      若固件还是老的欧拉角版本，大角度斜倾会稳定超出这个阈值。")
     return 0 if ok else 1
 
 
