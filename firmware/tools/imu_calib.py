@@ -1,17 +1,25 @@
 #!/usr/bin/env python3
-"""ESP-SparkBot 六轴 IMU 标定工具。
+"""ESP-SparkBot 六轴 IMU 工具：验证姿态精度 + 映射到游戏摇杆。
 
-配合固件里的 bmi270_imu.cc 使用。设备在 8080 端口暴露两个端点：
+设备在 8080 端口暴露两个端点：
     GET /imu       当前读数（JSON）
     GET /imu/zero  把当前姿态记为零点
 
-两种用法：
-    python3 firmware/tools/imu_calib.py -H 192.168.1.23           # 实时看倾斜
-    python3 firmware/tools/imu_calib.py -H 192.168.1.23 --calib   # 引导式标定
+=== 两件事分开，互不影响 ===
 
---calib 会带你朝前/后/左/右各倾一次，最后算出一张 2×2 映射表。这步不能省：
-板子上 BMI270 的贴片方向和机器人朝向不一定一致，不实测很容易出现
-「往左倾、球往右滚」——而且这种错在代码里看着完全合理，只能靠测量发现。
+1. **传感器本身**：只关心「读数准不准」和「哪根轴对应哪个方向」。
+   这部分由 --check（精度）和 --map（判轴）负责，结果写进 tilt_map.json
+   的 sensor 段。它跟游戏无关，换游戏不用重标。
+
+2. **游戏手感**：多少度算满舵、死区多大。这是纯主观参数，
+   由 --set-full 写进 game 段，也可以随时手改 json。
+   标定不会去测它，也不应该测——用人力去标「我能倾多少度」既不准也不稳定。
+
+常用：
+    python3 firmware/tools/imu_calib.py -H 192.168.1.23 --check
+    python3 firmware/tools/imu_calib.py -H 192.168.1.23            # 实时摇杆量
+    python3 firmware/tools/imu_calib.py --set-full 25              # 改满舵，不用连设备
+    python3 firmware/tools/imu_calib.py --show                     # 看配置 + 贴游戏代码
 
 只依赖标准库。设备地址也可以用环境变量 SPARKBOT_HOST 给。
 """
@@ -20,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -30,8 +39,21 @@ import urllib.request
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 PORT = 8080
 
-# 标定结果落盘的位置，--stick 会读这份来实时验证
 MAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tilt_map.json")
+
+# 游戏参数默认值。满舵 30° 是个中庸起点：比「手拿着最舒服的极限」略小，
+# 不用倾到手腕尽头就能打满，也不至于轻轻一晃就满舵。
+DEFAULT_GAME = {
+    "full_fwd": 30.0,
+    "full_rgt": 30.0,
+    "deadzone": 1.5,
+}
+DEFAULT_SENSOR = {
+    "axis_fwd": "tilt_y",
+    "axis_rgt": "tilt_x",
+    "sign_fwd": 1,
+    "sign_rgt": 1,
+}
 
 
 def fetch(host: str, path: str, timeout: float = 2.0) -> dict:
@@ -40,10 +62,50 @@ def fetch(host: str, path: str, timeout: float = 2.0) -> dict:
         return json.loads(resp.read().decode("utf-8", "replace"))
 
 
-def bar(value: float, full: float = 30.0, width: int = 21) -> str:
-    """把倾角画成条状，中心是零点，左负右正。终端里比纯数字直观得多。"""
+# ---------------------------------------------------------------------------
+# 配置读写
+# ---------------------------------------------------------------------------
+
+
+def load_cfg() -> dict:
+    """读配置。兼容早期「满舵和映射混在一个平铺字典里」的老格式，
+    这样升级工具不会让之前的标定结果作废。"""
+    cfg = {"sensor": dict(DEFAULT_SENSOR), "game": dict(DEFAULT_GAME)}
+    try:
+        with open(MAP_PATH, encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return cfg
+
+    if "sensor" in raw or "game" in raw:
+        cfg["sensor"].update(raw.get("sensor") or {})
+        cfg["game"].update(raw.get("game") or {})
+        return cfg
+
+    # 老格式
+    for k in ("axis_fwd", "axis_rgt", "sign_fwd", "sign_rgt"):
+        if k in raw:
+            cfg["sensor"][k] = raw[k]
+    for k in ("full_fwd", "full_rgt", "deadzone"):
+        if k in raw:
+            cfg["game"][k] = raw[k]
+    return cfg
+
+
+def save_cfg(cfg: dict) -> None:
+    with open(MAP_PATH, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# 小工具
+# ---------------------------------------------------------------------------
+
+
+def bar(value: float, full: float, width: int = 21) -> str:
+    """把数值画成条状，中心是零点，左负右正。终端里比纯数字直观。"""
     mid = width // 2
-    norm = max(-1.0, min(1.0, value / full))
+    norm = max(-1.0, min(1.0, value / max(full, 1e-6)))
     mag = round(abs(norm) * mid)
     cells = []
     for i in range(width):
@@ -56,8 +118,8 @@ def bar(value: float, full: float = 30.0, width: int = 21) -> str:
     return "".join(cells)
 
 
-def sample(host: str, seconds: float = 2.0) -> dict | None:
-    """稳定采样一段时间取平均，压掉手持抖动和单帧噪声。"""
+def sample(host: str, seconds: float = 1.5) -> dict | None:
+    """采一段取平均，压掉单帧噪声。返回 tilt 与单位重力向量。"""
     rows = []
     t0 = time.time()
     while time.time() - t0 < seconds:
@@ -71,17 +133,323 @@ def sample(host: str, seconds: float = 2.0) -> dict | None:
     if not rows:
         return None
     n = len(rows)
+    ax = sum(r["acc_g"][0] for r in rows) / n
+    ay = sum(r["acc_g"][1] for r in rows) / n
+    az = sum(r["acc_g"][2] for r in rows) / n
+    mag = math.sqrt(ax * ax + ay * ay + az * az)
     return {
         "tilt_x": sum(r["tilt_x"] for r in rows) / n,
         "tilt_y": sum(r["tilt_y"] for r in rows) / n,
-        "roll": sum(r["roll"] for r in rows) / n,
-        "pitch": sum(r["pitch"] for r in rows) / n,
+        "acc": (ax, ay, az),
+        "gvec": (ax / mag, ay / mag, az / mag) if mag > 1e-6 else (0.0, 0.0, 1.0),
+        "acc_mag": mag,
+        "gyr": (
+            sum(r["gyr_dps"][0] for r in rows) / n,
+            sum(r["gyr_dps"][1] for r in rows) / n,
+            sum(r["gyr_dps"][2] for r in rows) / n,
+        ),
         "n": n,
     }
 
 
+def _dot(a, b) -> float:
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def _angle_between(a, b) -> float:
+    """两个单位向量的夹角（度）。这就是「姿态变化了多少度」的几何真值。"""
+    return math.degrees(math.acos(max(-1.0, min(1.0, _dot(a, b)))))
+
+
+# ---------------------------------------------------------------------------
+# 1. 传感器：精度验证（不涉及任何「满舵」）
+# ---------------------------------------------------------------------------
+
+
+def _prompt(msg: str) -> None:
+    print(msg)
+    try:
+        input("   摆好不动后按回车… ")
+    except EOFError:
+        pass
+
+
+def check(host: str) -> int:
+    """验证姿态估计准不准，用三个姿势互相比对。
+
+    参考值从哪来？——重力方向。加速度计在准静态下唯一能绝对测准的就是
+    「重力朝哪个方向」，而且这个方向不受零偏、量程、刻度误差影响（只受
+    安装方向影响）。所以拿「两个姿势之间重力向量转过的角度」当几何真值，
+    再对比固件给出的 tilt 向量变化量，就能判断姿态解算是否可信。
+
+    这个测试不需要量角器，也不要求倾到某个特定角度。"""
+    cfg = load_cfg()
+    print("=" * 62)
+    print("姿态精度验证（不需要控制角度、不需要量角器）")
+    print("=" * 62)
+    print("原理：两个姿势之间重力方向转过的角度是几何真值，")
+    print("     固件给出的 tilt 变化量应该等于它。对不上就是解算有误差。\n")
+
+    _prompt("① 把设备平放（或任意舒服的姿势），别动")
+    a = sample(host, 1.8)
+    if a is None:
+        print("✗ 采不到数据。先确认 /imu 能通：curl http://%s:8080/imu" % host)
+        return 1
+    print(f"   tilt=({a['tilt_x']:+.1f}, {a['tilt_y']:+.1f})°  |a|={a['acc_mag']:.3f}g")
+
+    _prompt("② 朝一个方向倾到 30~40° 左右，保持住（准确角度不重要）")
+    b = sample(host, 1.8)
+    if b is None:
+        print("✗ 没采到数据")
+        return 1
+    print(f"   tilt=({b['tilt_x']:+.1f}, {b['tilt_y']:+.1f})°  |a|={b['acc_mag']:.3f}g")
+
+    _prompt("③ 换个方向再倾一次（往斜角倾最好），保持住")
+    c = sample(host, 1.8)
+    if c is None:
+        print("✗ 没采到数据")
+        return 1
+    print(f"   tilt=({c['tilt_x']:+.1f}, {c['tilt_y']:+.1f})°  |a|={c['acc_mag']:.3f}g\n")
+
+    pairs = [("①②", a, b), ("①③", a, c), ("②③", b, c)]
+    print(f"{'姿态对':<6}{'几何真值':>10}{'固件读数':>10}{'偏差':>9}{'相对误差':>10}")
+    worst_abs = 0.0
+    worst_rel = 0.0
+    usable = 0
+    for name, p, q in pairs:
+        truth = _angle_between(p["gvec"], q["gvec"])
+        dx = q["tilt_x"] - p["tilt_x"]
+        dy = q["tilt_y"] - p["tilt_y"]
+        got = math.hypot(dx, dy)
+        err = got - truth
+        rel = abs(err) / truth * 100 if truth > 3.0 else 0.0
+        if truth > 5.0:
+            usable += 1
+            worst_abs = max(worst_abs, abs(err))
+            worst_rel = max(worst_rel, rel)
+        print(f"{name:<6}{truth:9.1f}°{got:9.1f}°{err:+8.1f}°{rel:9.0f}%")
+
+    if usable == 0:
+        print("\n✗ 三个姿势之间几乎没有变化（都 <5°），没测到有效倾斜。")
+        print("  摆姿势时要真的把设备倾起来，再跑一次。")
+        return 1
+
+    mags = [p["acc_mag"] for p in (a, b, c)]
+    mag_spread = (max(mags) - min(mags)) * 100
+    print()
+    print(f"重力模长 {min(mags):.3f}~{max(mags):.3f}g，跨姿势漂移 {mag_spread:.1f}%"
+          "（<1.5% 说明加速度计刻度正常）")
+
+    # 静止抖动决定死区该留多大——这是唯一需要从传感器侧给游戏侧的建议值
+    nx, ny = _residual_noise(host)
+    noise = max(nx, ny)
+    cur_dz = cfg["game"]["deadzone"]
+    verdict = '够用' if cur_dz >= noise * 3 else '偏小，抖动会漏过去'
+    print(f"静止抖动 sd x{nx:.2f}° y{ny:.2f}°；当前死区 {cur_dz}°（{verdict}）")
+
+    print()
+    ok = worst_abs <= 5.0 and worst_rel <= 12.0
+    if ok:
+        print(f"✓ 通过：最大偏差 {worst_abs:.1f}°（{worst_rel:.0f}%），"
+              "姿态解算可信，可以拿来映射成摇杆")
+    else:
+        print(f"✗ 偏差偏大：最大 {worst_abs:.1f}°（{worst_rel:.0f}%）")
+        print("  常见原因：① 采样时手在抖（重新摆稳再测一次）")
+        print("            ② 大角度下欧拉角相减的固有误差（见下方说明）")
+    if mag_spread > 1.5:
+        print("⚠ 各姿势重力模长不一致，加速度计刻度或零偏有问题，角度不可全信")
+    print()
+    print("说明：固件的 tilt_x/tilt_y 是「两路独立欧拉角分别减零点」。单轴倾斜完全")
+    print("      精确；两轴同时倾时，向量和会比真实转角大一点——按固件公式模拟，")
+    print("      30~40° 区间平均过读 1°、极端斜角最多 ~9°。对摇杆来说约 3% 的比例")
+    print("      误差，感受不到；若上表偏差远超这个量级，才是真有问题。")
+    return 0 if ok else 1
+
+
+def _residual_noise(host: str) -> tuple[float, float]:
+    """静止 2 秒的 tilt 抖动（标准差，度）。死区设多大该看这个数。"""
+    rows = []
+    t0 = time.time()
+    while time.time() - t0 < 2.0:
+        try:
+            d = fetch(host, "/imu")
+            if d.get("ready"):
+                rows.append(d)
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+            pass
+        time.sleep(0.05)
+    if len(rows) < 5:
+        return (0.0, 0.0)
+
+    def sd(vals):
+        m = sum(vals) / len(vals)
+        return (sum((v - m) ** 2 for v in vals) / len(vals)) ** 0.5
+
+    return (sd([r["tilt_x"] for r in rows]), sd([r["tilt_y"] for r in rows]))
+
+
+# ---------------------------------------------------------------------------
+# 2. 传感器：判轴（只看方向，不看幅度）
+# ---------------------------------------------------------------------------
+
+
+def _dominant(s: dict) -> tuple[str, int]:
+    """看出一次倾斜主要落在哪个轴、正负如何。
+
+    只关心方向，所以倾 5° 和倾 30° 判出来完全一样——不需要控角。"""
+    tx, ty = s["tilt_x"], s["tilt_y"]
+    if abs(tx) >= abs(ty):
+        return "tilt_x", (1 if tx > 0 else -1)
+    return "tilt_y", (1 if ty > 0 else -1)
+
+
+def map_axes(host: str) -> int:
+    """只确定「哪个轴管前后、哪个轴管左右、符号是正还是负」。
+
+    这一步跟幅度完全无关，所以随便倾多少都行。改完之后 game 段原样保留，
+    你设的满舵不会被标定冲掉。"""
+    cfg = load_cfg()
+    print("=" * 62)
+    print("判轴（只定方向，不涉及幅度；你的满舵设置不会被动到）")
+    print("=" * 62)
+
+    try:
+        fetch(host, "/imu/zero")
+        print("   ✓ 已把当前姿态记为零点（零点只影响零位，不影响判轴）\n")
+    except (urllib.error.URLError, TimeoutError):
+        print("   ! /imu/zero 调用失败，用当前值继续\n")
+
+    _prompt("① 朝前倾一下（车头方向压低，倾多少度都行）")
+    s = sample(host, 1.2)
+    if s is None:
+        print("   ✗ 没采到数据")
+        return 1
+    f_axis, f_sign = _dominant(s)
+    minor = min(abs(s["tilt_x"]), abs(s["tilt_y"]))
+    major = max(abs(s["tilt_x"]), abs(s["tilt_y"]))
+    print(f"   x={s['tilt_x']:+.1f}°  y={s['tilt_y']:+.1f}°  → 前后 = "
+          f"{'+' if f_sign > 0 else '-'}{f_axis}")
+
+    _prompt("② 朝右倾一下（右侧压低）")
+    s = sample(host, 1.2)
+    if s is None:
+        print("   ✗ 没采到数据")
+        return 1
+    r_axis, r_sign = _dominant(s)
+    print(f"   x={s['tilt_x']:+.1f}°  y={s['tilt_y']:+.1f}°  → 左右 = "
+          f"{'+' if r_sign > 0 else '-'}{r_axis}")
+
+    if f_axis == r_axis:
+        print("\n✗ 前后和左右判到了同一个轴，说明有一次倾的方向不对。重跑一次。")
+        return 1
+
+    cfg["sensor"] = {
+        "axis_fwd": f_axis,
+        "axis_rgt": r_axis,
+        "sign_fwd": f_sign,
+        "sign_rgt": r_sign,
+    }
+    save_cfg(cfg)
+    print(f"\n已写入 {MAP_PATH} 的 sensor 段")
+    print(f"   {f_axis}({'正向' if f_sign > 0 else '负向'}) = 前   "
+          f"{r_axis}({'正向' if r_sign > 0 else '负向'}) = 右")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# 3. 游戏参数：满舵 / 死区，用户自己定
+# ---------------------------------------------------------------------------
+
+
+def set_full(host: str, spec: str, deadzone: float | None) -> int:
+    """设置「多少度算满舵」。这是纯手感参数，跟标定无关，随时可改。"""
+    cfg = load_cfg()
+    parts = [p.strip() for p in spec.replace("，", ",").split(",") if p.strip()]
+    try:
+        vals = [float(p) for p in parts]
+    except ValueError:
+        print("满舵要写成数字：--set-full 25 或 --set-full 25,30")
+        return 2
+    if any(v < 5.0 or v > 60.0 for v in vals):
+        print("满舵建议落在 5~60° 之间，否则不是难操作就是容易打满")
+        return 2
+    if len(vals) == 1:
+        vals = [vals[0], vals[0]]
+    if len(vals) != 2:
+        print("最多给两个数（前后, 左右）")
+        return 2
+
+    # 死区是手感参数，不自动推：只把静止抖动测出来当参考，
+    # 免得「手不动时漂一点点」被误当成操作。没给设备地址就跳过。
+    nd = 0.0
+    if host:
+        nd = max(_residual_noise(host))
+
+    cfg["game"]["full_fwd"] = vals[0]
+    cfg["game"]["full_rgt"] = vals[1]
+    if deadzone is not None:
+        cfg["game"]["deadzone"] = deadzone
+    save_cfg(cfg)
+
+    print(f"满舵 = 前后 {vals[0]:.0f}° / 左右 {vals[1]:.0f}°   "
+          f"死区 = {cfg['game']['deadzone']}°")
+    print(f"已写入 {MAP_PATH} 的 game 段")
+    if nd > 0:
+        print(f"   静止抖动实测 {nd:.2f}°，死区只要比它大 2~3 倍就不会自己抖")
+    print(f"当前手感：倾 {vals[0]:.0f}° 打满前进，倾 {vals[0] * 0.5:.0f}° 走一半")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# 4. 实时输出
+# ---------------------------------------------------------------------------
+
+
+def _axis_value(v: float, full: float, dz: float) -> float:
+    """死区之后线性，到满舵饱和，输出 -1 ~ +1。和打印给游戏的那段一致。"""
+    m = abs(v)
+    if m <= dz:
+        return 0.0
+    out = min((m - dz) / max(full - dz, 1e-3), 1.0)
+    return out if v > 0 else -out
+
+
+def snippet(cfg: dict) -> None:
+    """打印能直接贴进游戏的那段映射代码。"""
+    s, g = cfg["sensor"], cfg["game"]
+    print("\n" + "-" * 62)
+    print("贴进游戏代码（tilt_x / tilt_y 取自 /imu，单位是度）：")
+    print("```python")
+    print(f'AXIS_FWD = "{s["axis_fwd"]}"    # 前后轴')
+    print(f'AXIS_RGT = "{s["axis_rgt"]}"    # 左右轴')
+    print(f'SIGN_FWD = {s["sign_fwd"]:+d}    # 倾向前方时该轴是正还是负')
+    print(f'SIGN_RGT = {s["sign_rgt"]:+d}')
+    print(f'FULL_FWD = {g["full_fwd"]:.0f}    # 手感参数，随时可改')
+    print(f'FULL_RGT = {g["full_rgt"]:.0f}')
+    print(f'DEADZONE = {g["deadzone"]}')
+    print("")
+    print("def axis(v, full, dz=DEADZONE):")
+    print('    """死区之后线性，到满舵饱和。返回 -1 ~ +1。"""')
+    print("    m = abs(v)")
+    print("    if m <= dz:")
+    print("        return 0.0")
+    print("    out = min((m - dz) / max(full - dz, 1e-3), 1.0)")
+    print("    return out if v > 0 else -out")
+    print("")
+    print("def tilt_to_stick(d):")
+    print("    ay = axis(SIGN_FWD * d[AXIS_FWD], FULL_FWD)   # 前 +")
+    print("    ax = axis(SIGN_RGT * d[AXIS_RGT], FULL_RGT)   # 右 +")
+    print("    return ax, ay")
+    print("```")
+    print("-" * 62)
+
+
 def watch(host: str) -> int:
-    print("实时倾斜（Ctrl-C 退出）。把机器人往各个方向倾一下，看哪根条跟着动。\n")
+    """实时倾斜 + 按当前满舵换算的摇杆量。满舵一改，这里立刻跟着变。"""
+    cfg = load_cfg()
+    s, g = cfg["sensor"], cfg["game"]
+    print(f"实时（Ctrl-C 退出）。满舵 前后 {g['full_fwd']:.0f}° / 左右 "
+          f"{g['full_rgt']:.0f}°，死区 {g['deadzone']}°。\n")
     try:
         while True:
             d = fetch(host, "/imu")
@@ -89,18 +457,25 @@ def watch(host: str) -> int:
                 print(f"\r  未就绪: {d}", end="", flush=True)
                 time.sleep(0.3)
                 continue
-            tx, ty = d["tilt_x"], d["tilt_y"]
-            ax, ay, az = d["acc_g"]
+            tx = s["sign_rgt"] * d[s["axis_rgt"]]
+            ty = s["sign_fwd"] * d[s["axis_fwd"]]
+            ax = _axis_value(tx, g["full_rgt"], g["deadzone"])
+            ay = _axis_value(ty, g["full_fwd"], g["deadzone"])
             print(
-                f"\r x {tx:+6.1f} [{bar(tx)}]  y {ty:+6.1f} [{bar(ty)}]  "
-                f"a[{ax:+.2f} {ay:+.2f} {az:+.2f}]g  # {d['seq']:5d}",
+                f"\r({tx:+6.1f},{ty:+6.1f})°  ax {ax:+.2f}[{bar(ax * 20, 20)}]"
+                f"  ay {ay:+.2f}[{bar(ay * 20, 20)}]  ",
                 end="",
                 flush=True,
             )
-            time.sleep(0.08)
+            time.sleep(0.06)
     except KeyboardInterrupt:
         print("\n")
         return 0
+
+
+# ---------------------------------------------------------------------------
+# 5. 陀螺漂移（判断纯 IMU 指向是否可行的依据）
+# ---------------------------------------------------------------------------
 
 
 def _unwrap(prev: float, cur: float) -> float:
@@ -116,10 +491,8 @@ def _unwrap(prev: float, cur: float) -> float:
 def drift(host: str, seconds: float) -> int:
     """静止漂移测量。
 
-    这是「要不要上视觉方案」的唯一依据：
       yaw 只能靠陀螺积分，加速度计帮不上忙（没有磁力计），
       所以零偏会 1:1 变成每秒的指向误差。
-    同时用 acc 的方差判断设备到底有没有动——动了这次测量就作废。
     """
     print(f"静置测量 {seconds:.0f} 秒，期间不要碰设备…\n")
     rows: list[tuple[float, dict]] = []
@@ -160,17 +533,7 @@ def drift(host: str, seconds: float) -> int:
         m = mean(v)
         return (sum((x - m) ** 2 for x in v) / len(v)) ** 0.5
 
-    yaw_acc = 0.0
-    prev = float(rows[0][1]["yaw"])
-    for _, d in rows[1:]:
-        cur = float(d["yaw"])
-        yaw_acc += _unwrap(prev, cur)
-        prev = cur
-
     bias = (mean(gx), mean(gy), mean(gz))
-    rate = 60.0 * yaw_acc / span if span > 0 else 0.0   # °/min，实测（含固件死区）
-    # 固件对 yaw 设了 0.5 dps 死区，静止时根本不积分，所以实测 yaw 会显示「零漂移」。
-    # 这是假象：一旦开始动，零偏照样按比例累积。用 z 零偏直接换算出真实速率。
     raw_rate = 60.0 * bias[2]
 
     print(f"帧数 {n}  实际 {hz:.1f} Hz  时长 {span:.1f}s")
@@ -178,11 +541,9 @@ def drift(host: str, seconds: float) -> int:
     print(f"        x {mean(ax):+.3f}  y {mean(ay):+.3f}  z {mean(az):+.3f} g")
     print(f"陀螺零偏 x {bias[0]:+.3f}  y {bias[1]:+.3f}  z {bias[2]:+.3f} dps")
     print(f"        噪声 x {std(gx):.2f}  y {std(gy):.2f}  z {std(gz):.2f} dps")
-    print(f"yaw 实测累积 {yaw_acc:+.2f}°（固件死区 0.5dps 会吃掉静止漂移）")
     print(f"真实漂移率 {raw_rate:+.2f} °/min ({raw_rate / 60:+.3f} °/s)，按 z 零偏换算")
     print(f"         等价于每 {abs(60.0 / raw_rate) if abs(raw_rate) > 0.01 else 0:.0f} 秒偏 1°")
 
-    # 静止判定：设备一动，零偏和漂移率全都是垃圾数据
     still = std(mag) < 0.025 and max(std(gx), std(gy), std(gz)) < 1.5
     print()
     if not still:
@@ -201,222 +562,33 @@ def drift(host: str, seconds: float) -> int:
     return 0
 
 
-def _prompt(msg: str) -> None:
-    print(msg)
-    try:
-        input("   准备好后按回车… ")
-    except EOFError:
-        pass
-
-
-def _dominant(s: dict) -> tuple[str, int]:
-    """看出一次倾斜主要落在哪个轴、正负如何。
-
-    只关心方向，所以倾 5° 和倾 30° 判出来完全一样——不需要控角。"""
-    tx, ty = s["tilt_x"], s["tilt_y"]
-    if abs(tx) >= abs(ty):
-        return "tilt_x", (1 if tx > 0 else -1)
-    return "tilt_y", (1 if ty > 0 else -1)
-
-
-def _peak(host: str, key: str, seconds: float = 1.5) -> float | None:
-    """采一段，取 |key| 的 90 分位当「满舵」。
-
-    让用户倾到自己玩起来最舒服的最大幅度就行，多少度由他定，
-    我们只负责把这个幅度记下来当 1.0。"""
-    vals: list[float] = []
-    t0 = time.time()
-    while time.time() - t0 < seconds:
-        try:
-            d = fetch(host, "/imu")
-            if d.get("ready"):
-                vals.append(abs(float(d[key])))
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
-            pass
-        time.sleep(0.05)
-    if len(vals) < 5:
-        return None
-    vals.sort()
-    return vals[int(len(vals) * 0.9)]
-
-
-def calibrate(host: str) -> int:
-    print("=" * 62)
-    print("倾斜映射标定（不需要控制角度）")
-    print("=" * 62)
-    print("只回答两件事：哪个轴管前后、哪个轴管左右。倾多少度无所谓，")
-    print("倾 5° 和倾 30° 判出来的结果一样。最后一步再把你自己的最大幅度")
-    print("定为满舵，尺度由你定，不由 20° 这个数字定。\n")
-
-    base = sample(host, 1.2)
-    if base is None:
-        print("✗ 采不到数据。先确认 /imu 能通：curl http://%s:8080/imu" % host)
-        return 1
-    print(f"   平放时 tilt_x={base['tilt_x']:+.1f}° tilt_y={base['tilt_y']:+.1f}°")
-
-    try:
-        fetch(host, "/imu/zero")
-        print("   ✓ 已把当前姿态记为零点\n")
-    except (urllib.error.URLError, TimeoutError):
-        print("   ! /imu/zero 调用失败，继续用当前值做基准\n")
-
-    # —— 第一步：只判方向，不看幅度 ——
-    _prompt("① 朝前倾一下（车头方向压低，倾多少度都行，能看出方向就够）")
-    s = sample(host, 1.2)
-    if s is None:
-        print("   ✗ 没采到数据")
-        return 1
-    f_axis, f_sign = _dominant(s)
-    minor = min(abs(s["tilt_x"]), abs(s["tilt_y"]))
-    major = max(abs(s["tilt_x"]), abs(s["tilt_y"]))
-    print(f"   x={s['tilt_x']:+.1f}°  y={s['tilt_y']:+.1f}°  → 前后 = "
-          f"{'+' if f_sign > 0 else '-'}{f_axis}")
-    if major > 1.0 and minor / major > 0.45:
-        print(f"   ⚠ 两个轴都动了（次要分量占 {minor / major:.0%}），像是斜着倾的。"
-              "结果仍可用，想更准可以重来。")
-
-    _prompt("② 朝右倾一下（右侧压低）")
-    s = sample(host, 1.2)
-    if s is None:
-        print("   ✗ 没采到数据")
-        return 1
-    r_axis, r_sign = _dominant(s)
-    print(f"   x={s['tilt_x']:+.1f}°  y={s['tilt_y']:+.1f}°  → 左右 = "
-          f"{'+' if r_sign > 0 else '-'}{r_axis}")
-
-    if f_axis == r_axis:
-        print("\n✗ 前后和左右判到了同一个轴，说明有一次倾的方向不对。重跑一次。")
-        return 1
-
-    # —— 第二步：把你自己的最大幅度定为满舵 ——
-    print("\n接着定满舵：倾到「你在游戏里真会用的最大幅度」并保持 1.5 秒。")
-    _prompt("③ 朝前倾到最大，保持住")
-    full_f = _peak(host, f_axis)
-    if full_f is None or full_f < 3.0:
-        print("   ✗ 没能采到有效的最大幅度，重跑一次")
-        return 1
-    print(f"   前后满舵 = {full_f:.1f}°")
-
-    _prompt("④ 朝右倾到最大，保持住")
-    full_r = _peak(host, r_axis)
-    if full_r is None or full_r < 3.0:
-        print("   ✗ 没能采到有效的最大幅度，重跑一次")
-        return 1
-    print(f"   左右满舵 = {full_r:.1f}°")
-
-    # 两个方向满舵差太多，手感会不一致（一个方向很灵敏、另一个很钝）
-    if max(full_f, full_r) / min(full_f, full_r) > 1.4:
-        print(f"   ⚠ 两个方向差了 {max(full_f, full_r) / min(full_f, full_r):.1f} 倍，"
-              "手感会不一致。")
-        print(f"     想统一的话，建议两次都取 {min(full_f, full_r):.1f}° 左右。")
-
-    cfg = {
-        "axis_fwd": f_axis,
-        "axis_rgt": r_axis,
-        "sign_fwd": f_sign,
-        "sign_rgt": r_sign,
-        "full_fwd": round(full_f, 1),
-        "full_rgt": round(full_r, 1),
-        "deadzone": 1.5,
-    }
-    try:
-        with open(MAP_PATH, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=2)
-        print(f"\n已保存到 {MAP_PATH}")
-    except OSError as e:
-        print(f"\n! 保存失败：{e}")
-
-    print("\n" + "-" * 62)
-    print("贴进游戏代码（tilt_x / tilt_y 取自 /imu，单位是度）：")
-    print("```python")
-    print(f"AXIS_FWD = \"{f_axis}\"    # 前后轴")
-    print(f"AXIS_RGT = \"{r_axis}\"    # 左右轴")
-    print(f"SIGN_FWD = {f_sign:+d}          # 倾向前方时该轴是正还是负")
-    print(f"SIGN_RGT = {r_sign:+d}")
-    print(f"FULL_FWD = {full_f:.1f}         # 满舵：倾到这么大 = 1.0")
-    print(f"FULL_RGT = {full_r:.1f}")
-    print("")
-    print("DEADZONE = 1.5         # 手放着不动时的抖动余量，低于这个值算 0")
-    print("")
-    print("def axis(v, full, dz=DEADZONE):")
-    print("    \"\"\"死区之后线性，到满舵饱和。返回 -1 ~ +1。\"\"\"")
-    print("    m = abs(v)")
-    print("    if m <= dz:")
-    print("        return 0.0")
-    print("    out = min((m - dz) / max(full - dz, 1e-3), 1.0)")
-    print("    return out if v > 0 else -out")
-    print("")
-    print("def tilt_to_stick(d):")
-    print("    ay = axis(SIGN_FWD * d[AXIS_FWD], FULL_FWD)   # 前 +")
-    print("    ax = axis(SIGN_RGT * d[AXIS_RGT], FULL_RGT)   # 右 +")
-    print("    return ax, ay")
-    print("```")
-    print()
-    print("跑一次验证：朝前倾，ay 应该变正；朝右倾，ax 应该变正。")
-    print("方向反了就把对应的 SIGN_* 取反，不用重跑标定。")
-    print("-" * 62)
-    return 0
-
-
-def _axis_value(v: float, full: float, dz: float) -> float:
-    """死区之后线性，到满舵饱和，输出 -1 ~ +1。和打印给游戏的那段完全一致。"""
-    m = abs(v)
-    if m <= dz:
-        return 0.0
-    out = min((m - dz) / max(full - dz, 1e-3), 1.0)
-    return out if v > 0 else -out
-
-
-def stick(host: str) -> int:
-    try:
-        with open(MAP_PATH, encoding="utf-8") as f:
-            cfg = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        print(f"没有标定结果（{MAP_PATH}），先跑 --calib")
-        return 1
-
-    print("实时摇杆量（Ctrl-C 退出）。")
-    print("朝前倾 ay 应变正，朝右倾 ax 应变正；反了就改 SIGN_*，不用重标。\n")
-    try:
-        while True:
-            d = fetch(host, "/imu")
-            if not d.get("ready"):
-                time.sleep(0.3)
-                continue
-            ax = _axis_value(cfg["sign_rgt"] * d[cfg["axis_rgt"]],
-                             cfg["full_rgt"], cfg["deadzone"])
-            ay = _axis_value(cfg["sign_fwd"] * d[cfg["axis_fwd"]],
-                             cfg["full_fwd"], cfg["deadzone"])
-            print(
-                f"\r ax {ax:+.2f} [{bar(ax * 20)}]  ay {ay:+.2f} [{bar(ay * 20)}]   ",
-                end="",
-                flush=True,
-            )
-            time.sleep(0.06)
-    except KeyboardInterrupt:
-        print("\n")
-        return 0
+# ---------------------------------------------------------------------------
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="ESP-SparkBot 六轴 IMU 标定",
+        description="ESP-SparkBot 六轴 IMU 工具（姿态验证 / 判轴 / 摇杆参数）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    ap.add_argument(
-        "-H",
-        "--host",
-        default=os.environ.get("SPARKBOT_HOST", ""),
-        help="设备 IP（默认读环境变量 SPARKBOT_HOST）",
-    )
-    ap.add_argument("--calib", action="store_true", help="引导式标定（判轴 + 定满舵，不需要控角度）")
-    ap.add_argument("--stick", action="store_true", help="按已标定的映射实时显示摇杆量")
-    ap.add_argument("--drift", action="store_true", help="静置漂移测量（判断能否只用 IMU）")
+    ap.add_argument("-H", "--host", default=os.environ.get("SPARKBOT_HOST", ""),
+                    help="设备 IP（默认读环境变量 SPARKBOT_HOST）")
+    ap.add_argument("--check", action="store_true", help="姿态精度验证（不需要控制角度）")
+    ap.add_argument("--map", action="store_true", help="判轴：只定前后/左右对应哪个轴")
+    ap.add_argument("--set-full", metavar="DEG[,DEG]", help="设满舵角度，如 25 或 25,30")
+    ap.add_argument("--deadzone", type=float, default=None, help="配 --set-full，指定死区（度）")
+    ap.add_argument("--show", action="store_true", help="打印当前配置和可直接贴进游戏的代码")
+    ap.add_argument("--drift", action="store_true", help="静置漂移测量")
     ap.add_argument("--seconds", type=float, default=60.0, help="--drift 的采样时长")
     ap.add_argument("--status", action="store_true", help="只打印一次原始 JSON")
     args = ap.parse_args()
 
-    if not args.host:
+    if args.show:
+        cfg = load_cfg()
+        print(json.dumps(cfg, ensure_ascii=False, indent=2))
+        snippet(cfg)
+        return 0
+
+    if not args.host and (args.check or args.map or args.drift or args.status):
         print("需要设备地址：-H 192.168.x.x 或设置 SPARKBOT_HOST", file=sys.stderr)
         return 2
 
@@ -424,11 +596,15 @@ def main() -> int:
         if args.status:
             print(json.dumps(fetch(args.host, "/imu"), ensure_ascii=False, indent=2))
             return 0
+        if args.set_full:
+            return set_full(args.host, args.set_full, args.deadzone)
         if args.drift:
             return drift(args.host, args.seconds)
-        if args.stick:
-            return stick(args.host)
-        return calibrate(args.host) if args.calib else watch(args.host)
+        if args.check:
+            return check(args.host)
+        if args.map:
+            return map_axes(args.host)
+        return watch(args.host)
     except urllib.error.URLError as exc:
         print(f"\n连不上 {args.host}:{PORT} — {exc}", file=sys.stderr)
         print("检查：设备在同一网段？/status 能通？固件烧的是带 IMU 的版本？",
