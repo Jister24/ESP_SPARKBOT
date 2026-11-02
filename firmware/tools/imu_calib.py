@@ -241,11 +241,17 @@ def check(host: str) -> int:
           "（<1.5% 说明加速度计刻度正常）")
 
     # 静止抖动决定死区该留多大——这是唯一需要从传感器侧给游戏侧的建议值
-    nx, ny = _residual_noise(host)
+    nx, ny, still = _residual_noise(host)
     noise = max(nx, ny)
     cur_dz = cfg["game"]["deadzone"]
-    verdict = '够用' if cur_dz >= noise * 3 else '偏小，抖动会漏过去'
-    print(f"静止抖动 sd x{nx:.2f}° y{ny:.2f}°；当前死区 {cur_dz}°（{verdict}）")
+    if not still:
+        # 采样时手还在动，这个标准差是「人的动作」不是「传感器噪声」，
+        # 拿它推死区会得出「1.5° 太小」这种完全错误的结论，宁可不给。
+        print(f"静止抖动：这两秒设备在动（sd {nx:.1f}°/ {ny:.1f}°），跳过死区评估。"
+              f"当前死区 {cur_dz}°")
+    else:
+        verdict = '够用' if cur_dz >= noise * 3 else '偏小，抖动会漏过去'
+        print(f"静止抖动 sd x{nx:.2f}° y{ny:.2f}°；当前死区 {cur_dz}°（{verdict}）")
 
     # 固件在线估出来的陀螺零偏，能直接看出这颗芯片的偏置水平
     try:
@@ -264,18 +270,31 @@ def check(host: str) -> int:
               "姿态解算可信，可以拿来映射成摇杆")
     else:
         print(f"✗ 偏差偏大：最大 {worst_abs:.1f}°（{worst_rel:.0f}%）")
-        print("  常见原因：① 采样时手在抖（摆稳再测一次）")
-        print("            ② 固件不是四元数版本（欧拉角相减在大角度会过读 4~9°）")
+        print("  排查顺序（按被踩过的坑排）：")
+        print("  ① 固件里重力校正项有没有乘 kRadToDeg？err 是 rad/s，corr 是 dps，")
+        print("     少乘这一步校正强度只剩 1/57.3，滤波器变成纯陀螺积分，")
+        print("     表现为「静止时固件 roll 与加速度算出的 roll 差好几度」。")
+        print("  ② 零偏是不是按校正量积分学的？那样会在手持慢速倾斜时学飞，")
+        print("     几秒顶到限幅，然后往积分里灌假角速度。改成静止时直接抓。")
+        print("  ③ 姿态还没稳就按了回车（刚放下 / 刚倾斜完），摆定再测。")
+        print("  ④ 倾角用四元数旋转向量？那个量含 yaw，边倾边拧手腕会虚高。")
     if mag_spread > 1.5:
         print("⚠ 各姿势重力模长不一致，加速度计刻度或零偏有问题，角度不可全信")
     print()
-    print("说明：阈值为 2° / 5%。四元数解算在原理上严格精确，实测偏差应接近 0；")
-    print("      若固件还是老的欧拉角版本，大角度斜倾会稳定超出这个阈值。")
+    print("说明：阈值为 2° / 5%。实测倾角（roll/pitch 差）与重力方向真值偏差")
+    print("      应在 1° 量级；明显超标时先量一下「同一帧里固件 roll 和由")
+    print("      acc_g 算出的 roll」差多少——这个差值若不为 0，就不是分解公式")
+    print("      的问题，而是滤波器没跟上加速度计。")
     return 0 if ok else 1
 
 
-def _residual_noise(host: str) -> tuple[float, float]:
-    """静止 2 秒的 tilt 抖动（标准差，度）。死区设多大该看这个数。"""
+def _residual_noise(host: str) -> tuple[float, float, bool]:
+    """静止 2 秒的 tilt 抖动（标准差，度）。死区设多大该看这个数。
+
+    第三个返回值表示「这两秒里设备到底有没有静止」。check 的最后一步紧跟
+    在用户摆姿势之后，手上还没松劲，采到的标准差能到 10° 以上——那是人在
+    动，不是传感器噪声，拿它推死区会得出完全错误的结论。
+    """
     rows = []
     t0 = time.time()
     while time.time() - t0 < 2.0:
@@ -287,13 +306,17 @@ def _residual_noise(host: str) -> tuple[float, float]:
             pass
         time.sleep(0.05)
     if len(rows) < 5:
-        return (0.0, 0.0)
+        return (0.0, 0.0, False)
 
     def sd(vals):
         m = sum(vals) / len(vals)
         return (sum((v - m) ** 2 for v in vals) / len(vals)) ** 0.5
 
-    return (sd([r["tilt_x"] for r in rows]), sd([r["tilt_y"] for r in rows]))
+    nx = sd([r["tilt_x"] for r in rows])
+    ny = sd([r["tilt_y"] for r in rows])
+    # 真静止时抖动量级是 0.1~0.5°；超过 2° 基本可以断定人在动
+    still = max(nx, ny) < 2.0
+    return (nx, ny, still)
 
 
 # ---------------------------------------------------------------------------
@@ -391,7 +414,8 @@ def set_full(host: str, spec: str, deadzone: float | None) -> int:
     # 免得「手不动时漂一点点」被误当成操作。没给设备地址就跳过。
     nd = 0.0
     if host:
-        nd = max(_residual_noise(host))
+        nx, ny, still = _residual_noise(host)
+        nd = max(nx, ny) if still else 0.0
 
     cfg["game"]["full_fwd"] = vals[0]
     cfg["game"]["full_rgt"] = vals[1]
