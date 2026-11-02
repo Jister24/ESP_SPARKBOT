@@ -221,7 +221,32 @@ fun Glyph(kind: Int, tint: Color? = null, size: Int = 22) {
                 }
                 drawPath(arrow, color)
             }
-            2 -> { // 相机
+            2 -> { // 姿态：等轴测立方体
+                val cx = s * 0.5f
+                val cy = s * 0.5f
+                val r = s * 0.36f
+                val pts = (0 until 6).map { i ->
+                    val a = Math.toRadians(30.0 + 60.0 * i)
+                    Offset(
+                        cx + (r * Math.cos(a)).toFloat(),
+                        cy + (r * Math.sin(a)).toFloat()
+                    )
+                }
+                val hex = Path().apply {
+                    moveTo(pts[0].x, pts[0].y)
+                    for (i in 1..5) lineTo(pts[i].x, pts[i].y)
+                    close()
+                }
+                drawPath(hex, color, style = Stroke(width = w))
+                // 中心连到下方三个顶点，立方体的立体感就出来了
+                for (i in 0 until 3) {
+                    drawLine(
+                        color, Offset(cx, cy), pts[i], w * 0.8f,
+                        StrokeCap.Round
+                    )
+                }
+            }
+            3 -> { // 相机
                 drawRoundRect(
                     color = color,
                     topLeft = Offset(s * 0.1f, s * 0.28f),

@@ -84,6 +84,15 @@ data class UiState(
     val deviceRot: Boolean get() = status?.rot ?: true
 }
 
+/**
+ * 姿态流。[frame] 为 null 表示没数据（没连上 / 固件没这功能 / 连续失败）。
+ * [rttMs] 是一次 `/imu` 往返耗时，20Hz 时基本就等于 20~80。
+ */
+data class ImuState(
+    val frame: SparkApi.Imu? = null,
+    val rttMs: Int = 0
+)
+
 class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private val store = DeviceStore(app)
@@ -142,6 +151,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         stopMotion()
         store.setMode(mode)
         _state.update { it.copy(mode = mode, status = null, latencyMs = null) }
+        restartImuIfRunning()
         if (mode == LinkMode.REMOTE) {
             startPolling()
             emit("已切换到远程访问：${_state.value.remoteHost}")
@@ -213,6 +223,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             it.copy(currentIp = ip, mode = LinkMode.LAN, status = null, latencyMs = null)
         }
         startPolling()
+        restartImuIfRunning()
         if (notify) emit("已切换到 $ip")
     }
 
@@ -360,6 +371,72 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 delay(3000)
             }
+        }
+    }
+
+    // ---------------- IMU 姿态 ----------------
+
+    /**
+     * 姿态页单独订阅，不塞进 [UiState]：20Hz 更新会让整棵 UI 每帧重组，
+     * 而实际上只有姿态页需要它。
+     */
+    private val _imu = MutableStateFlow(ImuState())
+    val imu = _imu.asStateFlow()
+
+    private var imuJob: Job? = null
+    private var imuFails = 0
+
+    /** 姿态页可见时才轮询，切走立刻停——别让它在后台 20Hz 打设备。 */
+    fun startImuPolling() {
+        if (imuJob != null || endpoint() == null) return
+        imuFails = 0
+        imuJob = viewModelScope.launch {
+            while (isActive) {
+                val ep = endpoint() ?: break
+                val begin = SystemClock.elapsedRealtime()
+                val frame = withContext(Dispatchers.IO) {
+                    runCatching { SparkApi.imu(ep) }.getOrNull()
+                }
+                val cost = (SystemClock.elapsedRealtime() - begin).toInt()
+                if (frame != null) {
+                    imuFails = 0
+                    _imu.value = ImuState(frame, cost)
+                } else {
+                    // 单次超时不代表掉线（设备偶尔在编图传/刷屏），连续失败才判离线
+                    imuFails += 1
+                    if (imuFails >= 5 && _imu.value.frame != null) {
+                        _imu.value = _imu.value.copy(frame = null)
+                    }
+                }
+                // 一次往返 20~80ms 本身就是节流，补齐到 50ms 一帧（20Hz）
+                val rest = IMU_PERIOD_MS - cost
+                delay(if (rest > 10) rest.toLong() else 10L)
+            }
+        }
+    }
+
+    fun stopImuPolling() {
+        imuJob?.cancel()
+        imuJob = null
+        imuFails = 0
+        _imu.value = ImuState()
+    }
+
+    /** endpoint 变了（换设备 / 切远程）就得重开，否则还在往旧地址拉。 */
+    private fun restartImuIfRunning() {
+        if (imuJob == null) return
+        stopImuPolling()
+        startImuPolling()
+    }
+
+    /** 把当前姿态设成零点：之后 tilt_x / tilt_y 相对它算，3D 模型不受影响。 */
+    fun zeroImu() {
+        val ep = endpoint() ?: return
+        viewModelScope.launch {
+            val ok = withContext(Dispatchers.IO) {
+                runCatching { SparkApi.zeroImu(ep) }.isSuccess
+            }
+            emit(if (ok) "已把当前姿态设为零点" else "零点设置失败")
         }
     }
 
@@ -765,6 +842,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         super.onCleared()
         pollJob?.cancel()
         holdJob?.cancel()
+        imuJob?.cancel()
         streamer?.stop()
         webView?.destroy()
         webView = null
@@ -778,6 +856,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
         /** 离线自动重扫的最小间隔：一次 /24 扫描要十秒左右，太频繁会白耗电。 */
         private const val AUTO_SCAN_GAP_MS = 60_000L
+
+        /**
+         * 姿态轮询周期。固件 100Hz 采样，但走 HTTP 每次都要新建连接，
+         * 实测上限就在 20Hz 附近晃（单次 20~80ms），定 50ms 既跑满又不堆积。
+         */
+        private const val IMU_PERIOD_MS = 50
 
         private val IP_REGEX = Regex("""^(\d{1,3}\.){3}\d{1,3}$""")
     }

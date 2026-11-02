@@ -37,6 +37,28 @@ object SparkApi {
         val chassisCharging: Boolean = false
     )
 
+    /**
+     * `/imu` 的一帧。四元数是 body→world 的旋转（世界系 z 朝上），
+     * 所以机体顶点乘 [q] 就得到它现在的真实姿态。
+     */
+    data class Imu(
+        val ready: Boolean,
+        val mode: String,
+        val hz: Int,
+        val seq: Long,
+        val accG: List<Float>,
+        val gyrDps: List<Float>,
+        /** w, x, y, z；老固件没有这个字段时为 null。 */
+        val q: List<Float>?,
+        val roll: Float,
+        val pitch: Float,
+        val yaw: Float,
+        val tiltX: Float,
+        val tiltY: Float,
+        /** 在线估计出的陀螺零偏（dps）。z 轴不可观测，别当真。 */
+        val gbias: List<Float>
+    )
+
     private fun connect(
         endpoint: Endpoint,
         path: String,
@@ -95,6 +117,38 @@ object SparkApi {
             chassisCharging = j.optBoolean("chassis_charging", false)
         )
     }
+
+    /**
+     * 读一帧 IMU。固件 100Hz 采样，但走 HTTP 拉的上限只有 20Hz 左右
+     * （每次都是新建连接，单次 20~80ms），做姿态显示够用，
+     * 想做低延迟手柄得等固件改成 UDP 推流。
+     */
+    fun imu(endpoint: Endpoint, timeoutMs: Int = 1200): Imu {
+        val j = JSONObject(getText(endpoint, "/imu", timeoutMs))
+        return Imu(
+            ready = j.optBoolean("ready", false),
+            mode = j.optString("mode", ""),
+            hz = j.optInt("hz", 0),
+            seq = j.optLong("seq", 0L),
+            accG = j.optJSONArray("acc_g").toFloatList(3),
+            gyrDps = j.optJSONArray("gyr_dps").toFloatList(3),
+            q = j.optJSONArray("q")?.toFloatList(4),
+            roll = j.optDouble("roll", 0.0).toFloat(),
+            pitch = j.optDouble("pitch", 0.0).toFloat(),
+            yaw = j.optDouble("yaw", 0.0).toFloat(),
+            tiltX = j.optDouble("tilt_x", 0.0).toFloat(),
+            tiltY = j.optDouble("tilt_y", 0.0).toFloat(),
+            gbias = j.optJSONArray("gbias").toFloatList(3)
+        )
+    }
+
+    /** 把「现在这个姿态」设成零点，之后 tilt_x / tilt_y 相对它算。 */
+    fun zeroImu(endpoint: Endpoint, timeoutMs: Int = 2000): String =
+        getText(endpoint, "/imu/zero", timeoutMs)
+
+    private fun org.json.JSONArray?.toFloatList(n: Int): List<Float> =
+        if (this == null) List(n) { 0f }
+        else List(n) { optDouble(it, 0.0).toFloat() }
 
     fun move(endpoint: Endpoint, x: Float, y: Float, timeoutMs: Int = 1500) {
         getText(endpoint, "/move?x=${fmt(x)}&y=${fmt(y)}", timeoutMs)

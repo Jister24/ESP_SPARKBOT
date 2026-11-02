@@ -44,6 +44,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.shike.sparkbot.ui.Accent
 import com.shike.sparkbot.ui.AccountScreen
+import com.shike.sparkbot.ui.AttitudeScreen
 import com.shike.sparkbot.ui.Bg
 import com.shike.sparkbot.ui.CameraScreen
 import com.shike.sparkbot.ui.ControlScreen
@@ -68,7 +69,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private val TABS = listOf("设备" to 0, "遥控" to 1, "相机" to 2, "账号" to 3)
+private val TABS = listOf("设备" to 0, "遥控" to 1, "姿态" to 2, "相机" to 3, "账号" to 4)
 
 @Composable
 fun AppRoot(vm: AppViewModel = viewModel()) {
@@ -101,7 +102,7 @@ fun AppRoot(vm: AppViewModel = viewModel()) {
 
     LaunchedEffect(tab) {
         if (tab != 1) vm.stopMotion()
-        if (tab != 2) vm.stopCamera()
+        if (tab != 3) vm.stopCamera()
     }
 
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
@@ -109,7 +110,8 @@ fun AppRoot(vm: AppViewModel = viewModel()) {
             when (tab) {
                 0 -> DeviceScreen(state, vm)
                 1 -> ControlScreen(state, vm)
-                2 -> CameraScreen(state, vm)
+                2 -> AttitudeScreen(state, vm)
+                3 -> CameraScreen(state, vm)
                 else -> AccountScreen(state, vm)
             }
         }
@@ -139,7 +141,7 @@ private fun BottomBar(current: Int, onSelect: (Int) -> Unit) {
                     Modifier
                         .clip(RoundedCornerShape(14.dp))
                         .clickable { onSelect(index) }
-                        .padding(horizontal = 18.dp, vertical = 6.dp),
+                        .padding(horizontal = 13.dp, vertical = 6.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Glyph(kind = index, tint = if (active) Accent else TextMuted, size = 20)
