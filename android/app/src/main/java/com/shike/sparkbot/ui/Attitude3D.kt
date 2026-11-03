@@ -30,8 +30,12 @@ import kotlin.math.sqrt
 // =============================================================================
 // 姿态可视化：把固件 /imu 的四元数直接乘到机体顶点上，透视投影 + 朗伯着色。
 //
-// 坐标系跟固件完全一致（静止水平时 acc_g ≈ (0, 0, +1)g）：
-//   +x 机体右侧   +y 车头方向   +z 机体上方（顶面法向）
+// 坐标系跟固件完全一致（静止水平时 acc_g ≈ (0, 0, +1)g，右手系）：
+//   +x 车头方向   +y 机体左侧   +z 机体上方（顶面法向）
+// 即 x×y = z：前 × 左 = 上。这个约定由固件的倾斜定义反推得到——
+// 前倾时 pitch>0 说明车尾在 -x，右倾时 roll>0 说明左侧在 +y。
+// 别凭「常见 3D 习惯」写成 +x 右 / +y 前：那样模型会绕错轴转 90°，
+// 静置水平时看不出来，一倾斜就变成「左右倾显示成前后倾」。
 // q 是 body→world，所以 世界坐标 = q.rotate(机体坐标)。不做任何转置/取反，
 // 否则会出现「倾斜方向正好反了」这种很难自查的现象。
 //
@@ -153,9 +157,9 @@ internal fun rememberSmoothedQuat(target: Quat?): Quat {
 // 尺寸按 60×60×70mm 的机身取相对比例，视觉上比真实略瘦，倾斜更容易看出来。
 // ---------------------------------------------------------------------------
 
-private const val HX = 1.0f   // 半宽
-private const val HY = 1.05f  // 半长（车头方向）
-private const val HZ = 1.15f  // 半高
+private const val HL = 1.05f  // 半长（沿 +x，车头方向）
+private const val HW = 1.0f   // 半宽（沿 +y，左右）
+private const val HH = 1.15f  // 半高（沿 +z）
 
 private data class Face(
     val corners: IntArray,
@@ -165,47 +169,48 @@ private data class Face(
 )
 
 private val BOX_VERTICES = arrayOf(
-    V3(-HX, -HY, -HZ), V3(HX, -HY, -HZ), V3(HX, HY, -HZ), V3(-HX, HY, -HZ),
-    V3(-HX, -HY, HZ), V3(HX, -HY, HZ), V3(HX, HY, HZ), V3(-HX, HY, HZ)
+    V3(-HL, -HW, -HH), V3(HL, -HW, -HH), V3(HL, HW, -HH), V3(-HL, HW, -HH),
+    V3(-HL, -HW, HH), V3(HL, -HW, HH), V3(HL, HW, HH), V3(-HL, HW, HH)
 )
 
 /** 顶点序按「从外侧看逆时针」，这样叉积恒指向外，背面剔除才成立。 */
 private val BOX_FACES = listOf(
-    Face(intArrayOf(6, 2, 3, 7), V3(0f, 1f, 0f), 1.00f),   // +y 前
-    Face(intArrayOf(0, 1, 5, 4), V3(0f, -1f, 0f), 0.72f),  // -y 后
-    Face(intArrayOf(1, 2, 6, 5), V3(1f, 0f, 0f), 0.86f),   // +x 右
-    Face(intArrayOf(3, 0, 4, 7), V3(-1f, 0f, 0f), 0.78f),  // -x 左
+    Face(intArrayOf(6, 2, 3, 7), V3(0f, 1f, 0f), 0.86f),   // +y 左
+    Face(intArrayOf(0, 1, 5, 4), V3(0f, -1f, 0f), 0.78f),  // -y 右
+    Face(intArrayOf(1, 2, 6, 5), V3(1f, 0f, 0f), 1.00f),   // +x 前（车头）
+    Face(intArrayOf(3, 0, 4, 7), V3(-1f, 0f, 0f), 0.72f),  // -x 后（车尾）
     Face(intArrayOf(4, 5, 6, 7), V3(0f, 0f, 1f), 1.12f),   // +z 顶
     Face(intArrayOf(1, 0, 3, 2), V3(0f, 0f, -1f), 0.55f)   // -z 底
 )
 
-/** 正面那块表情屏，贴在 +y 面上、略微外移避免与本体共面打架。 */
+/** 正面那块表情屏，贴在 +x（车头）面上、略微外移避免与本体共面打架。 */
 private val SCREEN_QUAD = arrayOf(
-    V3(0.60f, HY + 0.004f, 0.52f), V3(0.60f, HY + 0.004f, -0.50f),
-    V3(-0.60f, HY + 0.004f, -0.50f), V3(-0.60f, HY + 0.004f, 0.52f)
+    V3(HL + 0.004f, 0.60f, 0.52f), V3(HL + 0.004f, 0.60f, -0.50f),
+    V3(HL + 0.004f, -0.60f, -0.50f), V3(HL + 0.004f, -0.60f, 0.52f)
 )
 
 /** 顶面指向车头的箭头（三个点，从 +z 看逆时针）。 */
 private val ARROW_TRI = arrayOf(
-    V3(0f, 0.78f, HZ + 0.004f),
-    V3(-0.30f, 0.14f, HZ + 0.004f),
-    V3(0.30f, 0.14f, HZ + 0.004f)
+    V3(0.78f, 0f, HH + 0.004f),
+    V3(0.14f, 0.30f, HH + 0.004f),
+    V3(0.14f, -0.30f, HH + 0.004f)
 )
 
 /** 相机基向量。垂直方向的 up 用世界 +z（跟固件 z 朝上一致）。 */
 private class Camera(val eye: V3, val forward: V3, val right: V3, val up: V3)
 
 /**
- * 相机站在 +y（车头）一侧看向原点。right = forward × up 是右手系推导出来的，
- * 因此相机在车头前方时，机体的 +x 落在屏幕**左**侧——这是「面对面看着它」
- * 的正常观感，反过来写会让左右倾看起来是镜像的。
+ * azimuth = 0 时相机站在 +x（车头正前方），正值绕世界 z 转向 +y（左侧）。
+ * right = forward × up 是右手系推导出来的，因此站在车头前看过去，机体的
+ * +y（左）落在屏幕**右**侧——这是「面对面看着它」的正常观感，
+ * 反过来写会让左右倾看起来是镜像的。
  */
 private fun cameraFor(azimuthDeg: Float, elevationDeg: Float, dist: Float): Camera {
     val az = Math.toRadians(azimuthDeg.toDouble())
     val el = Math.toRadians(elevationDeg.toDouble())
     val dir = V3(
-        (sin(az) * cos(el)).toFloat(),
         (cos(az) * cos(el)).toFloat(),
+        (sin(az) * cos(el)).toFloat(),
         sin(el).toFloat()
     )
     val eye = dir * dist
@@ -379,7 +384,7 @@ internal fun AttitudeView(
         faces.forEach { drawPath(it.path, it.color) }
 
         // ---- 正面屏幕：只有朝前时才可见（背面剔除同样做一遍） ----
-        val frontVisible = orientation.rotate(V3(0f, 1f, 0f)).dot(
+        val frontVisible = orientation.rotate(V3(1f, 0f, 0f)).dot(
             (orientation.rotate(SCREEN_QUAD[0]) - cam.eye).unit()
         ) < 0f
         if (frontVisible) {
@@ -397,7 +402,7 @@ internal fun AttitudeView(
 
         // ---- 顶面箭头：标出车头，倾斜时一眼看出机身转向 ----
         val topVisible = orientation.rotate(V3(0f, 0f, 1f)).dot(
-            (orientation.rotate(V3(0f, 0f, HZ)) - cam.eye).unit()
+            (orientation.rotate(V3(0f, 0f, HH)) - cam.eye).unit()
         ) < 0f
         if (topVisible) {
             val p = ARROW_TRI.map { proj.project(orientation.rotate(it)) }

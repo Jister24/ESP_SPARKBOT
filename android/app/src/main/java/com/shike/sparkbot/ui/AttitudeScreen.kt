@@ -47,7 +47,8 @@ fun AttitudeScreen(state: UiState, vm: AppViewModel) {
     val feed by vm.imu.collectAsState()
     val frame = feed.frame
 
-    var azimuth by remember { mutableStateOf(36f) }
+    // 相机默认站在车头右前方（azimuth 负值绕世界 z 转向 -y，即右侧）
+    var azimuth by remember { mutableStateOf(-36f) }
     var elevation by remember { mutableStateOf(28f) }
 
     // 页面可见才轮询：切走之后还在 20Hz 打设备只会白耗电、白占 socket。
@@ -94,7 +95,7 @@ fun AttitudeScreen(state: UiState, vm: AppViewModel) {
                     elevation = (elevation + dEl).coerceIn(-72f, 82f)
                 },
                 onResetView = {
-                    azimuth = 36f
+                    azimuth = -36f
                     elevation = 28f
                 }
             )
@@ -119,7 +120,7 @@ fun AttitudeScreen(state: UiState, vm: AppViewModel) {
                     .clip(RoundedCornerShape(10.dp))
                     .background(SurfaceHigh)
                     .clickable {
-                        azimuth = 36f
+                        azimuth = -36f
                         elevation = 28f
                     }
                     .padding(horizontal = 10.dp, vertical = 6.dp)
@@ -129,9 +130,9 @@ fun AttitudeScreen(state: UiState, vm: AppViewModel) {
 
             // 左下角：轴的颜色图例
             Column(Modifier.align(Alignment.BottomStart).padding(12.dp)) {
-                AxisLegend("+x 右", Danger)
-                AxisLegend("+y 车头", Teal)
-                AxisLegend("+z 顶面", Warn)
+                AxisLegend("+x 车头", Danger)
+                AxisLegend("+y 左", Teal)
+                AxisLegend("+z 上", Warn)
             }
         }
 
