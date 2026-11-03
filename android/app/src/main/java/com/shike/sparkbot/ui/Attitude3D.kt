@@ -140,6 +140,12 @@ internal fun rememberSmoothedQuat(target: Quat?): Quat {
         var last = withFrameNanos { it }
         while (true) {
             withFrameNanos { now ->
+                // 120Hz 屏上每两个 vsync 更新一次 → 60fps。
+                // 姿态转动在 60fps 观感已经饱和，但每帧 Canvas 要记 6ms 左右的
+                // 绘制指令，正好贴着 120Hz 的 8.3ms 预算，任何一点抖动都会掉帧。
+                // 降到 60fps 后每帧有 16.6ms 余量。
+                // 60Hz 屏（16.67ms 一帧）本来就满足条件，行为不变。
+                if (now - last < 15_000_000L) return@withFrameNanos
                 val dt = ((now - last) / 1_000_000_000.0).toFloat().coerceIn(0.001f, 0.1f)
                 last = now
                 val t = latest.value ?: return@withFrameNanos

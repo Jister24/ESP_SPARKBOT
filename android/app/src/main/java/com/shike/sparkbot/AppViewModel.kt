@@ -30,8 +30,12 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -382,6 +386,27 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      */
     private val _imu = MutableStateFlow(ImuState())
     val imu = _imu.asStateFlow()
+
+    /**
+     * 给**文字面板**用的降频版本（5Hz）。
+     *
+     * 3D 视图继续吃 [imu] 的 20Hz（它内部再平滑到 60fps），但 ROLL / PITCH / YAW
+     * 这些数字人眼根本读不出 50ms 的差别。用 20Hz 直接驱动整页重组，会让
+     * 120Hz 屏每 6 帧就超一次预算：实测 UI 线程 p90 从 1.7ms 抬到 15.7ms、
+     * 19%~25% 的帧掉到 30fps，主观就是「偶尔顿一下」。
+     *
+     * 没有数据（frame == null）时立即放行，空状态提示不会延迟 200ms 才出现。
+     */
+    val imuUi: StateFlow<ImuState> = flow {
+        var last = 0L
+        _imu.collect { st ->
+            val now = SystemClock.elapsedRealtime()
+            if (last == 0L || st.frame == null || now - last >= IMU_UI_PERIOD_MS) {
+                last = now
+                emit(st)
+            }
+        }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, ImuState())
 
     private var imuJob: Job? = null
     private var imuFails = 0
@@ -862,6 +887,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
          * 实测上限就在 20Hz 附近晃（单次 20~80ms），定 50ms 既跑满又不堆积。
          */
         private const val IMU_PERIOD_MS = 50
+
+        /**
+         * 文字面板刷新周期。20Hz 会让整页重组得比 120Hz 屏的帧预算还勤，
+         * 降到 5Hz——数字仍然跟手，但 UI 线程不再被格式化+布局塞满。
+         */
+        private const val IMU_UI_PERIOD_MS = 200
 
         private val IP_REGEX = Regex("""^(\d{1,3}\.){3}\d{1,3}$""")
     }

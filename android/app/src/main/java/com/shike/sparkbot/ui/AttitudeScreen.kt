@@ -33,7 +33,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.shike.sparkbot.AppViewModel
+import com.shike.sparkbot.ImuState
 import com.shike.sparkbot.UiState
+import kotlinx.coroutines.flow.StateFlow
 import kotlin.math.abs
 
 /**
@@ -41,10 +43,14 @@ import kotlin.math.abs
  *
  * 满舵角度、死区这些**不在这页**——那些是游戏参数，跟「姿态准不准」是两件事。
  * 这页只回答一个问题：机器人现在是什么姿势。
+ *
+ * 数据分两条流：文字面板吃 5Hz 的 `imuUi`，3D 视图自己订阅 20Hz 的 `imu`
+ * 再平滑到 60fps。20Hz 驱动整页重组会把 120Hz 屏的帧预算吃穿（实测 p90
+ * UI 线程 15.7ms vs 预算 8.3ms，19% 掉帧），体感就是「偶尔顿一下」。
  */
 @Composable
 fun AttitudeScreen(state: UiState, vm: AppViewModel) {
-    val feed by vm.imu.collectAsState()
+    val feed by vm.imuUi.collectAsState()
     val frame = feed.frame
 
     // 相机默认站在车头右前方（azimuth 负值绕世界 z 转向 -y，即右侧）
@@ -58,8 +64,6 @@ fun AttitudeScreen(state: UiState, vm: AppViewModel) {
     DisposableEffect(Unit) {
         onDispose { vm.stopImuPolling() }
     }
-
-    val targetQ = remember(frame) { frame?.toQuat() }
 
     Column(
         Modifier
@@ -87,7 +91,7 @@ fun AttitudeScreen(state: UiState, vm: AppViewModel) {
                 .background(Surface)
         ) {
             AttitudeStage(
-                q = targetQ,
+                feed = vm.imu,
                 azimuth = azimuth,
                 elevation = elevation,
                 onOrbit = { dAz, dEl ->
@@ -211,16 +215,22 @@ fun AttitudeScreen(state: UiState, vm: AppViewModel) {
 /**
  * 单独一层，让 60fps 的平滑状态只影响这个 Canvas 的重组范围，
  * 不至于把整页的文字每帧都刷一遍。
+ *
+ * 这里自己订阅 20Hz 的 [feed]，而不是从上层传 q 进来——否则 20Hz 的
+ * `collectAsState` 会把整个 Column（含 14 次字符串格式化）一起重组。
  */
 @Composable
 private fun AttitudeStage(
-    q: Quat?,
+    feed: StateFlow<ImuState>,
     azimuth: Float,
     elevation: Float,
     onOrbit: (Float, Float) -> Unit,
     onResetView: () -> Unit
 ) {
-    val smooth = rememberSmoothedQuat(q)
+    val f by feed.collectAsState()
+    // 用 seq 当 key：同一帧重复重组时不必再算一次四元数
+    val targetQ = remember(f.frame?.seq) { f.frame?.toQuat() }
+    val smooth = rememberSmoothedQuat(targetQ)
     AttitudeView(
         q = smooth,
         azimuth = azimuth,
@@ -243,7 +253,7 @@ private fun Metric(
         Text(label, color = TextMuted, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(4.dp))
         Text(
-            value?.let { (if (signed) String.format(java.util.Locale.US, "%+.1f°", it) else fmt1(it)) } ?: "—",
+            value?.let { if (signed) signedDeg(it) else fmt1(it) } ?: "—",
             color = if (value == null) TextMuted else TextMain,
             fontSize = 19.sp,
             fontWeight = FontWeight.SemiBold
@@ -292,6 +302,38 @@ private fun com.shike.sparkbot.net.SparkApi.Imu.toQuat(): Quat? {
     return Quat.fromEulerDeg(roll, pitch, yaw)
 }
 
-private fun fmt1(v: Float) = String.format(java.util.Locale.US, "%.1f", v)
-private fun fmt2(v: Float) = String.format(java.util.Locale.US, "%.2f", v)
-private fun fmt3(v: Float) = String.format(java.util.Locale.US, "%.3f", v)
+/**
+ * 定点格式化，替代 `String.format`。
+ *
+ * 这一页一屏有 14 处数字要格式化，`String.format` 每次都要解析一遍格式串、
+ * 分配 Formatter，单次几十微秒、十几处叠起来就在 UI 线程上量出来了。
+ * 这里直接整数取整拼字符串，行为等价于 `%.Nf`（四舍五入、不补千分位）。
+ */
+private fun fixed(v: Float, decimals: Int): String {
+    val scale = when (decimals) {
+        1 -> 10
+        2 -> 100
+        else -> 1000
+    }
+    val n = kotlin.math.round(v * scale).toInt()
+    val a = if (n < 0) -n else n
+    val whole = a / scale
+    val frac = a % scale
+    val sign = if (n < 0) "-" else ""
+    return when (decimals) {
+        1 -> "$sign$whole.$frac"
+        // frac 补前导零：0..99 → "05"；0..999 → "005"
+        2 -> "$sign$whole.${(frac + 100).toString().substring(1)}"
+        else -> "$sign$whole.${(frac + 1000).toString().substring(1)}"
+    }
+}
+
+private fun fmt1(v: Float) = fixed(v, 1)
+private fun fmt2(v: Float) = fixed(v, 2)
+private fun fmt3(v: Float) = fixed(v, 3)
+
+/** 带符号的 `%+.1f°`；正数补 '+'，零按正数处理。 */
+private fun signedDeg(v: Float): String {
+    val s = fixed(v, 1)
+    return if (s.startsWith("-")) "$s°" else "+$s°"
+}
