@@ -60,9 +60,19 @@ fun AttitudeScreen(state: UiState, vm: AppViewModel) {
     // 页面可见才轮询：切走之后还在 20Hz 打设备只会白耗电、白占 socket。
     // key 带上连接目标——第一次进来可能还没选设备，那时 endpoint() 是 null，
     // 只写 LaunchedEffect(Unit) 的话选完设备也不会自动起来。
-    LaunchedEffect(state.currentIp, state.mode) { vm.startImuPolling() }
+    //
+    // 同时把 /status 轮询停掉：固件 httpd 是单任务串行的，一条卡住的连接
+    // 就能让 /imu 排队（弱网丢包时尤其明显）。姿态页的数据全来自 /imu，
+    // 不需要再让一个大请求去抢那唯一的 handler。
+    LaunchedEffect(state.currentIp, state.mode) {
+        vm.pauseStatusPolling()
+        vm.startImuPolling()
+    }
     DisposableEffect(Unit) {
-        onDispose { vm.stopImuPolling() }
+        onDispose {
+            vm.stopImuPolling()
+            vm.resumeStatusPolling()
+        }
     }
 
     Column(

@@ -378,6 +378,23 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * 姿态页可见期间暂停 `/status` 轮询。
+     *
+     * 固件端 httpd 只有一条任务、串行跑所有端点：只要有一条连接卡在 recv 上，
+     * 排在后面的 20Hz `/imu` 就一起冻住。姿态页本来也不需要 /status
+     * （地址/Hz/时延全部来自 /imu 本身），停掉它就少了一个会拖慢姿态的请求。
+     */
+    fun pauseStatusPolling() {
+        pollJob?.cancel()
+        pollJob = null
+    }
+
+    /** 离开姿态页时把轮询接回去；已经在跑就不重复起。 */
+    fun resumeStatusPolling() {
+        if (pollJob == null) startPolling()
+    }
+
     // ---------------- IMU 姿态 ----------------
 
     /**
@@ -410,11 +427,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private var imuJob: Job? = null
     private var imuFails = 0
+    private var imuLastOkAt = 0L
 
     /** 姿态页可见时才轮询，切走立刻停——别让它在后台 20Hz 打设备。 */
     fun startImuPolling() {
         if (imuJob != null || endpoint() == null) return
         imuFails = 0
+        imuLastOkAt = SystemClock.elapsedRealtime()
         imuJob = viewModelScope.launch {
             while (isActive) {
                 val ep = endpoint() ?: break
@@ -423,13 +442,17 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     runCatching { SparkApi.imu(ep) }.getOrNull()
                 }
                 val cost = (SystemClock.elapsedRealtime() - begin).toInt()
+                val now = SystemClock.elapsedRealtime()
                 if (frame != null) {
                     imuFails = 0
+                    imuLastOkAt = now
                     _imu.value = ImuState(frame, cost)
                 } else {
-                    // 单次超时不代表掉线（设备偶尔在编图传/刷屏），连续失败才判离线
+                    // 单次超时不代表掉线：手机侧 2.4G 空口实测丢包 14%，
+                    // 偶发一两次超时是常态。判离线的口径按**时间**而不是次数
+                    // ——400ms 超时 × 5 次会把一秒钟的抖动直接显示成「无数据」。
                     imuFails += 1
-                    if (imuFails >= 5 && _imu.value.frame != null) {
+                    if (_imu.value.frame != null && now - imuLastOkAt > IMU_LOST_MS) {
                         _imu.value = _imu.value.copy(frame = null)
                     }
                 }
@@ -893,6 +916,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
          * 降到 5Hz——数字仍然跟手，但 UI 线程不再被格式化+布局塞满。
          */
         private const val IMU_UI_PERIOD_MS = 200
+
+        /**
+         * 多久没拿到帧才认定「无 IMU 数据」。
+         * 一次超时不算断流（弱网下 400ms 超时本身就会偶发发生），
+         * 1.5 秒还没一帧成功才清空画面，避免数字面板反复闪「无数据」。
+         */
+        private const val IMU_LOST_MS = 1500L
 
         private val IP_REGEX = Regex("""^(\d{1,3}\.){3}\d{1,3}$""")
     }

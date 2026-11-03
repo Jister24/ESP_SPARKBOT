@@ -16,6 +16,12 @@ object SparkApi {
     const val CTRL_PORT = 8080
     const val CAM_PORT = 8081
 
+    /**
+     * 单帧 `/imu` 的往返上限。20Hz 拉流时正常值只有 20~80ms，
+     * 留到 400ms 是给"偶发一次重传"的余量；再长就等于让用户干等。
+     */
+    const val IMU_TIMEOUT_MS = 400
+
     data class Status(
         val ip: String,
         val x: Float,
@@ -119,11 +125,16 @@ object SparkApi {
     }
 
     /**
-     * 读一帧 IMU。固件 100Hz 采样，但走 HTTP 拉的上限只有 20Hz 左右
+     * 读一帧 IMU。固件 100Hz 采样，走 HTTP 拉的上限只有 20Hz 左右
      * （每次都是新建连接，单次 20~80ms），做姿态显示够用，
      * 想做低延迟手柄得等固件改成 UDP 推流。
+     *
+     * 超时只给 [IMU_TIMEOUT_MS]：实测手机侧 2.4G 空口丢包 14%、TCP 一次
+     * 重传退避就是 1 秒起步，超时设成 1 秒以上等于让姿态画面**跟着重传一起
+     * 冻结**，用户看到的就是"卡一下，时延跳到 1000ms+"。宁可丢掉这一帧、
+     * 下一轮立刻用新连接重试，也不要把界面钉在一条卡住的连接上。
      */
-    fun imu(endpoint: Endpoint, timeoutMs: Int = 1200): Imu {
+    fun imu(endpoint: Endpoint, timeoutMs: Int = IMU_TIMEOUT_MS): Imu {
         val j = JSONObject(getText(endpoint, "/imu", timeoutMs))
         return Imu(
             ready = j.optBoolean("ready", false),
